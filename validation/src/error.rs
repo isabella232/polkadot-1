@@ -85,6 +85,12 @@ pub enum Error {
 	/// Could not cover fee for an operation e.g. for sending `UpwardMessage`.
 	#[display(fmt = "Parachain could not cover fee for an operation e.g. for sending an `UpwardMessage`.")]
 	CouldNotCoverFee,
+    /// Recieved an invalid approval checker assignment 
+	#[display(fmt = "Recieved an invalid approval checker assignment: {}", _0)]
+    BadAssignmnet(&'static str),
+    /// Invalid story used for approval checker assignments
+	#[display(fmt = "Invalid story for approval checker assignments: {}", _0)]
+    BadStory(&'static str),
 }
 
 impl std::error::Error for Error {

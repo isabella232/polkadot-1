@@ -44,6 +44,8 @@ use primitives::Pair;
 
 use futures::prelude::*;
 
+pub mod approval;
+
 pub use self::block_production::ProposerFactory;
 pub use self::collation::Collators;
 pub use self::error::Error;
