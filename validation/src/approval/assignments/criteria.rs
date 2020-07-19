@@ -34,7 +34,7 @@ impl ApprovalContext {
 /// 
 /// We determine how the relay chain contet, any criteria data, and
 /// any relevant stories impact VRF invokation using this trait,
-pub trait Criteria : Clone {
+pub(super) trait Criteria : Clone {
     /// Additionl data required for constructing the VRF input
     type Story;
 
@@ -147,24 +147,21 @@ impl<C: Criteria,K> Assignment<C,K> {
     pub fn checker(&self) -> &K { &self.checker }
 }
 
-impl<C,K> Assignment<C,K> 
-where 
-    C: Criteria, 
-    K: Borrow<Keypair>,  // Replace with another method of location our own signing key
-{
+impl<C> Assignment<C,()> where C: Criteria {
     /// Create our own `Assignment` for the given criteria, story,
     /// and our keypair, by constructing its `VRFInOut`.
-    ///
-    /// We borrow the `Keypair` here for convenience, but `Arc<Keypair>` works.
-    // Or else you should add a keypair argument to `sign` too.
-    pub fn create(criteria: C, checker: K, story: &C::Story) -> AssignmentResult<Assignment<C,K>> {
+    pub fn create(criteria: C, story: &C::Story, checker: &Keypair) -> AssignmentResult<Assignment<C,()>> {
         let vrf_inout = checker.borrow().vrf_create_hash(criteria.vrf_input(story) ?);
-        Ok(Assignment { criteria, checker, vrf_inout, })
+        Ok(Assignment { criteria, checker: (), vrf_inout, })
     }
 
     /// VRF sign our assignment for announcment.
-    pub fn sign(&self, context: ApprovalContext) -> AssignmentSigned<C> {
-        let checker = self.checker.borrow();
+    ///
+    /// We could take `K: Borrow<Keypair>` above in `create`, saving us
+    /// the `checker` argument here, and making `K=Arc<Keypair>` work,
+    /// except `Assignment`s always occur with so much repetition that
+    /// passing the `Keypair` again makes more sense.
+    pub fn sign(&self, context: ApprovalContext, checker: &Keypair) -> AssignmentSigned<C> {
         // Must exactly mirror `schnorrkel::Keypair::vrf_sign_extra`
         // or else rerun one point multiplicaiton in vrf_create_hash
         let t = self.criteria.extra(&context);
@@ -210,6 +207,11 @@ impl<C: Criteria> AssignmentSigned<C> {
         Ok((context, Assignment { criteria: criteria.clone(), checker, vrf_inout, }))
     }
 }
+
+
+
+
+
 
 
 
