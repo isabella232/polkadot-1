@@ -8,6 +8,7 @@
 //! actually use in validating assignment criteria. 
 //! In short, stories isolate our data dependencies upon the relay chain.
 
+use std::sync::Arc;
 use std::collections::HashMap;
 
 use babe_primitives::{EquivocationProof, AuthorityId, make_transcript};
@@ -24,6 +25,16 @@ pub type SlotNumber = u64;
 
 /// A epoch number.
 pub type EpochNumber = u64;
+
+
+/// All parachain/thread ids permitted in the given `epoch` and `slot`.
+///
+/// We expect results to depend upon the chain state two epochs before
+/// `epoch` and optionally upon `slot`, but more recent dependencies
+/// within the epochs `epoch` or `epoch-1` require analysis.
+pub(super) fn allowed_paraids(epoch: &Epoch, _slot: SlotNumber) -> Arc<[ParaId]> {
+    unimplemented!()
+}
 
 
 /// Identifies the relay chain block in which we declared these

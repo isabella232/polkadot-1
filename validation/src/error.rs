@@ -87,7 +87,7 @@ pub enum Error {
 	CouldNotCoverFee,
     /// Recieved an invalid approval checker assignment 
 	#[display(fmt = "Recieved an invalid approval checker assignment: {}", _0)]
-    BadAssignmnet(&'static str),
+    BadAssignment(&'static str),
     /// Invalid story used for approval checker assignments
 	#[display(fmt = "Invalid story for approval checker assignments: {}", _0)]
     BadStory(&'static str),

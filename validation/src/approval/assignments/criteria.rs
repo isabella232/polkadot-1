@@ -1,4 +1,8 @@
 //! Approval checker asignment VRF criteria
+//!
+//! TODO: We should expand RelayVRFModulo to do rejection sampling
+//! using `vrf::vrf_merge`, which requires `Vec<..>`s for
+//! `AssignmentSigned::vrf_preout` and `Assignment::vrf_inout`.
 
 use core::borrow::Borrow;
 
@@ -17,6 +21,13 @@ use super::{
 };
 
 
+/*
+pub(super) struct Position {
+    delay_tranche: u16,
+    paraid: ParaId,
+}
+*/
+
 
 impl ApprovalContext {
     pub fn transcript(&self) -> Transcript {
@@ -34,14 +45,14 @@ impl ApprovalContext {
 /// 
 /// We determine how the relay chain contet, any criteria data, and
 /// any relevant stories impact VRF invokation using this trait,
-pub(super) trait Criteria : Clone {
+pub trait Criteria : Clone {
     /// Additionl data required for constructing the VRF input
     type Story;
 
     /// Write the transcript from which build the VRF input.  
     ///
     /// Errors if Any errors indicate 
-    fn vrf_input(&self, story: &Self::Story) -> AssignmentResult<Transcript>;
+    fn vrf_input(&self, story: &Self::Story, sample: u16) -> AssignmentResult<Transcript>;
 
     /// Initialize the transcript for our Schnorr DLEQ proof.
     ///
@@ -50,6 +61,8 @@ pub(super) trait Criteria : Clone {
     fn extra(&self, context: &ApprovalContext) -> Transcript { 
         context.transcript()
     }
+
+    // fn position(&self, vrf_inout: &vrf::VRFInOut) -> Position;
 }
 
 
@@ -66,7 +79,8 @@ impl Criteria for RelayVRFModulo {
 
     /// Panics if the relay chain block has an invalid Ristretto point as VRF pre-output.
     /// If this happenes then polkadot must shut down for repars and fork anyways.
-    fn vrf_input(&self, story: &Self::Story) -> AssignmentResult<Transcript> {
+    fn vrf_input(&self, story: &Self::Story, sample: u16) -> AssignmentResult<Transcript> {
+        if sample > 0 { return Err(Error::BadAssignment("RelayVRFModulo does not yet support additional samples")); }
         let mut t = Transcript::new(b"Approval Assignment VRF");
         t.append_message(b"RelayVRFModulo", &story.anv_rc_vrf_source );
         Ok(t)
@@ -90,7 +104,11 @@ impl Criteria for RelayVRFDelay {
 
     /// Panics if the relay chain block has an invalid Ristretto point as VRF pre-output.
     /// If this happenes then polkadot must shut down for repars and fork anyways.
-    fn vrf_input(&self, story: &Self::Story) -> AssignmentResult<Transcript> {
+    fn vrf_input(&self, story: &Self::Story, sample: u16) -> AssignmentResult<Transcript> {
+        if sample > 0 {
+            // TODO: Is this really a BadAssignment or a BadStory or something else?
+            return Err(Error::BadAssignment("RelayVRFDelay cannot ever support additional samples")); 
+        }
         let mut t = Transcript::new(b"Approval Assignment VRF");
         t.append_message(b"RelayVRFDelay", &story.anv_rc_vrf_source );
         t.append_u64(b"ParaId", u32::from(self.paraid).into() );
@@ -116,7 +134,11 @@ impl Criteria for RelayEquivocation {
     /// additional approval checks triggered by relay chain equivocations.
     ///
     /// Errors if paraid does not yet count as a candidate equivocation 
-    fn vrf_input(&self, story: &Self::Story) -> AssignmentResult<Transcript> {
+    fn vrf_input(&self, story: &Self::Story, sample: u16) -> AssignmentResult<Transcript> {
+        if sample > 0 {
+            // TODO: Is this really a BadAssignment or a BadStory or something else?
+            return Err(Error::BadAssignment("RelayVRFDelay cannot ever support additional samples")); 
+        }
         let h = story.candidate_equivocations.get(&self.paraid)
             .ok_or(Error::BadStory("Not a candidate equivocation")) ?;
         let mut t = Transcript::new(b"Approval Assignment VRF");
@@ -127,8 +149,9 @@ impl Criteria for RelayEquivocation {
 }
 
 
-/// Internal representation for an assigment with some computable
-/// position. We should obtain these first by verifying a signed
+/// Internal representation for a assigment with some computable
+/// delay. 
+/// We should obtain these first by verifying a signed
 /// assignment using `AssignmentSigned::verify`, or simularly using
 /// `Criteria::attach` manually, and secondly by evaluating our own
 /// criteria.  In the later case, we produce a signed assignment
@@ -142,8 +165,8 @@ pub struct Assignment<C: Criteria, K> {
     vrf_inout: vrf::VRFInOut,
 }
 
-impl<C: Criteria,K> Assignment<C,K> {
-    /// Return the checker of type `K`
+impl<C,K> Assignment<C,K> where C: Criteria {
+    /// Identify the checker as a `&K` 
     pub fn checker(&self) -> &K { &self.checker }
 }
 
@@ -151,7 +174,7 @@ impl<C> Assignment<C,()> where C: Criteria {
     /// Create our own `Assignment` for the given criteria, story,
     /// and our keypair, by constructing its `VRFInOut`.
     pub fn create(criteria: C, story: &C::Story, checker: &Keypair) -> AssignmentResult<Assignment<C,()>> {
-        let vrf_inout = checker.borrow().vrf_create_hash(criteria.vrf_input(story) ?);
+        let vrf_inout = checker.borrow().vrf_create_hash(criteria.vrf_input(story,0) ?);
         Ok(Assignment { criteria, checker: (), vrf_inout, })
     }
 
@@ -173,6 +196,7 @@ impl<C> Assignment<C,()> where C: Criteria {
     }
 }
 
+
 /// Announcable VRF signed assignment
 pub struct AssignmentSigned<C: Criteria> {
     context: ApprovalContext,
@@ -186,7 +210,7 @@ impl<C: Criteria> AssignmentSigned<C> {
     /// Get publickey identifying checker
     pub fn checker(&self) -> AssignmentResult<PublicKey> {
         PublicKey::from_bytes(&self.checker)
-        .map_err(|_| Error::BadAssignmnet("Bad VRF signature (bad publickey)"))
+        .map_err(|_| Error::BadAssignment("Bad VRF signature (bad publickey)"))
     }
 
     /// Verify a signed assignment
@@ -197,18 +221,68 @@ impl<C: Criteria> AssignmentSigned<C> {
         let checker = self.checker() ?;
         let vrf_inout = vrf::VRFOutput::from_bytes(vrf_preout)
             .expect("length enforced statically")
-            .attach_input_hash(&checker, self.criteria.vrf_input(story) ?)
-            .map_err(|_| Error::BadAssignmnet("Bad VRF signature (bad pre-output)")) ?;
+            .attach_input_hash(&checker, self.criteria.vrf_input(story,0) ?)
+            .map_err(|_| Error::BadAssignment("Bad VRF signature (bad pre-output)")) ?;
         let vrf_proof = vrf::VRFProof::from_bytes(vrf_proof)
-            .map_err(|_| Error::BadAssignmnet("Bad VRF signature (bad proof)")) ?;
+            .map_err(|_| Error::BadAssignment("Bad VRF signature (bad proof)")) ?;
         let t = criteria.extra(&context);
         let _ = checker.dleq_verify(t, &vrf_inout, &vrf_proof, vrf::KUSAMA_VRF)
-            .map_err(|_| Error::BadAssignmnet("Bad VRF signature (invalid)")) ?;
+            .map_err(|_| Error::BadAssignment("Bad VRF signature (invalid)")) ?;
         Ok((context, Assignment { criteria: criteria.clone(), checker, vrf_inout, }))
     }
 }
 
 
+impl<K> Assignment<RelayVRFModulo,K> {
+    /// Assign our `ParaId` from allowed `ParaId` returnned by
+    /// `stories::allowed_paraids`.
+    pub fn paraid(&self, context: &ApprovalContext) -> AssignmentResult<ParaId> {
+        // TODO: Optimize accessing this from `ApprovalContext`
+        let paraids = stories::allowed_paraids(&context.fetch_epoch(), context.slot);
+        // We use u64 here to give a reasonable distribution modulo the number of parachains
+        let mut parachain = u64::from_le_bytes(self.vrf_inout.make_bytes::<[u8; 8]>(b"parachain"));
+        parachain %= paraids.len() as u64;  // assumes usize < u64
+        Ok(paraids[parachain as usize])
+    }
+
+    /// Always assign `RelayVRFModulo` the zeroth delay tranche
+    pub fn delay_tranche(&self) -> u64 { 0 }
+}
+
+/// Approval checkers assignment criteria that 
+pub trait DelayCriteria : Criteria {
+    /// All delay based assignment criteria contain an explicit paraid
+    fn paraid(&self) -> ParaId;
+}
+impl DelayCriteria for RelayVRFDelay {
+    fn paraid(&self) -> ParaId { self.paraid }
+}
+impl DelayCriteria for RelayEquivocation {
+    fn paraid(&self) -> ParaId { self.paraid }
+}
+
+impl<C,K> Assignment<C,K> where C: DelayCriteria {
+    /// Assign our `ParaId` from the one explicitly stored, but error 
+    /// if disallowed by `stories::allowed_paraids`.
+    pub(super) fn paraid(&self, context: &ApprovalContext) -> AssignmentResult<ParaId> {
+        use core::ops::Deref;
+        let paraid = self.criteria.paraid();
+        stories::allowed_paraids(&context.fetch_epoch(), context.slot)
+        .deref()
+        .binary_search(&paraid)
+        .map(|_| paraid)
+        .map_err(|_| Error::BadAssignment("RelayEquivocation has bad ParaId"))
+    }
+
+    /// Assign our delay using our VRF output
+    pub(super) fn delay_tranche(&self) -> u32 {
+        let max_tranches: u32 = unimplemented!();
+        // We use u64 here to give a reasonable distribution modulo the number of tranches
+        let mut tranche = u64::from_le_bytes(self.vrf_inout.make_bytes::<[u8; 8]>(b"tranche"));
+        tranche %= max_tranches as u64;
+        tranche as u32
+    }
+}
 
 
 
