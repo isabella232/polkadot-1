@@ -1,5 +1,9 @@
 //! Approval checker asignment VRF criteria
 //!
+//! We manage the actual VRF computations for approval checker
+//! assignments inside this module, so most schnorrkell logic gets
+//! isolated here.
+//!
 //! TODO: We should expand RelayVRFModulo to do rejection sampling
 //! using `vrf::vrf_merge`, which requires `Vec<..>`s for
 //! `AssignmentSigned::vrf_preout` and `Assignment::vrf_inout`.
@@ -45,7 +49,7 @@ impl ApprovalContext {
 /// 
 /// We determine how the relay chain contet, any criteria data, and
 /// any relevant stories impact VRF invokation using this trait,
-pub trait Criteria : Clone {
+pub trait Criteria : Clone + 'static {
     /// Additionl data required for constructing the VRF input
     type Story;
 
@@ -56,8 +60,8 @@ pub trait Criteria : Clone {
 
     /// Initialize the transcript for our Schnorr DLEQ proof.
     ///
-    /// Any criteria data that requires authentication, currently empty,
-    /// but optionally replaces signing this gossip message, saving 64 bytes.
+    /// Any criteria data that requires authentication, which should make
+    /// signing gossip messages unecessary, saving 64 bytes, etc.
     fn extra(&self, context: &ApprovalContext) -> Transcript { 
         context.transcript()
     }
@@ -233,12 +237,23 @@ impl<C: Criteria> AssignmentSigned<C> {
 }
 
 
-impl<K> Assignment<RelayVRFModulo,K> {
+/// We require `Assignment<C,K>` methods generic over `C`
+/// that position this assignment inside the assignment tracker
+pub(super) trait Position {
+    /// Assignment's  our `ParaId` from allowed `ParaId` returnned by
+    /// `stories::allowed_paraids`.
+    fn paraid(&self, context: &ApprovalContext) -> AssignmentResult<ParaId>;
+
+    /// Always assign `RelayVRFModulo` the zeroth delay tranche
+    fn delay_tranche(&self) -> super::DelayTranche { 0 }
+}
+
+impl<K> Position for Assignment<RelayVRFModulo,K> {
     /// Assign our `ParaId` from allowed `ParaId` returnned by
     /// `stories::allowed_paraids`.
-    pub fn paraid(&self, context: &ApprovalContext) -> AssignmentResult<ParaId> {
+    fn paraid(&self, context: &ApprovalContext) -> AssignmentResult<ParaId> {
         // TODO: Optimize accessing this from `ApprovalContext`
-        let paraids = stories::allowed_paraids(&context.fetch_epoch(), context.slot);
+        let paraids = context.allowed_paraids();
         // We use u64 here to give a reasonable distribution modulo the number of parachains
         let mut parachain = u64::from_le_bytes(self.vrf_inout.make_bytes::<[u8; 8]>(b"parachain"));
         parachain %= paraids.len() as u64;  // assumes usize < u64
@@ -246,10 +261,13 @@ impl<K> Assignment<RelayVRFModulo,K> {
     }
 
     /// Always assign `RelayVRFModulo` the zeroth delay tranche
-    pub fn delay_tranche(&self) -> u64 { 0 }
+    fn delay_tranche(&self) -> super::DelayTranche { 0 }
 }
 
-/// Approval checkers assignment criteria that 
+/// Approval checker assignment criteria that fully utilizes delays.
+///
+/// We require this helper trait to help unify the handling of  
+/// `RelayVRFDelay` and `RelayEquivocation`.
 pub trait DelayCriteria : Criteria {
     /// All delay based assignment criteria contain an explicit paraid
     fn paraid(&self) -> ParaId;
@@ -261,21 +279,20 @@ impl DelayCriteria for RelayEquivocation {
     fn paraid(&self) -> ParaId { self.paraid }
 }
 
-impl<C,K> Assignment<C,K> where C: DelayCriteria {
+impl<C,K> Position for Assignment<C,K> where C: DelayCriteria {
     /// Assign our `ParaId` from the one explicitly stored, but error 
     /// if disallowed by `stories::allowed_paraids`.
-    pub(super) fn paraid(&self, context: &ApprovalContext) -> AssignmentResult<ParaId> {
+    fn paraid(&self, context: &ApprovalContext) -> AssignmentResult<ParaId> {
         use core::ops::Deref;
         let paraid = self.criteria.paraid();
-        stories::allowed_paraids(&context.fetch_epoch(), context.slot)
-        .deref()
+        context.allowed_paraids().deref()
         .binary_search(&paraid)
         .map(|_| paraid)
         .map_err(|_| Error::BadAssignment("RelayEquivocation has bad ParaId"))
     }
 
     /// Assign our delay using our VRF output
-    pub(super) fn delay_tranche(&self) -> u32 {
+    fn delay_tranche(&self) -> super::DelayTranche {
         let max_tranches: u32 = unimplemented!();
         // We use u64 here to give a reasonable distribution modulo the number of tranches
         let mut tranche = u64::from_le_bytes(self.vrf_inout.make_bytes::<[u8; 8]>(b"tranche"));
@@ -283,8 +300,6 @@ impl<C,K> Assignment<C,K> where C: DelayCriteria {
         tranche as u32
     }
 }
-
-
 
 
 

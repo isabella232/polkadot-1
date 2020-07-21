@@ -27,16 +27,6 @@ pub type SlotNumber = u64;
 pub type EpochNumber = u64;
 
 
-/// All parachain/thread ids permitted in the given `epoch` and `slot`.
-///
-/// We expect results to depend upon the chain state two epochs before
-/// `epoch` and optionally upon `slot`, but more recent dependencies
-/// within the epochs `epoch` or `epoch-1` require analysis.
-pub(super) fn allowed_paraids(epoch: &Epoch, _slot: SlotNumber) -> Arc<[ParaId]> {
-    unimplemented!()
-}
-
-
 /// Identifies the relay chain block in which we declared these
 /// parachain candidates to be availability 
 pub struct ApprovalContext {
@@ -71,6 +61,15 @@ impl ApprovalContext {
 
     /// Fetch full epoch data from self.epoch
     pub fn fetch_epoch(&self) -> Epoch {
+        unimplemented!()
+    }
+
+    /// All parachain/thread ids permitted in the given `epoch` and `slot`.
+    ///
+    /// We expect results to depend upon the chain state two epochs before
+    /// `epoch` and optionally upon `slot`, but more recent dependencies
+    /// within the epochs `epoch` or `epoch-1` require analysis.
+    pub(super) fn allowed_paraids(&self) -> Arc<[ParaId]> {
         unimplemented!()
     }
 
