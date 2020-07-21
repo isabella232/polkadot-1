@@ -25,14 +25,6 @@ use super::{
 };
 
 
-/*
-pub(super) struct Position {
-    delay_tranche: u16,
-    paraid: ParaId,
-}
-*/
-
-
 impl ApprovalContext {
     pub fn transcript(&self) -> Transcript {
         let mut t = Transcript::new(b"Approval Assignment Signature");
