@@ -153,7 +153,7 @@ impl Criteria for RelayEquivocation {
 /// `Criteria::attach` manually, and secondly by evaluating our own
 /// criteria.  In the later case, we produce a signed assignment
 /// by calling `Assignment::sign`.
-pub struct Assignment<C: Criteria, K> {
+pub struct Assignment<C: Criteria, K = ValidatorId> {
     /// Assignment criteria specific data
     criteria: C,
     /// Assigned checker's key

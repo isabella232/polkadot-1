@@ -29,6 +29,7 @@ pub type EpochNumber = u64;
 
 /// Identifies the relay chain block in which we declared these
 /// parachain candidates to be availability 
+#[derive(PartialEq,Eq)]
 pub struct ApprovalContext {
     /// Relay chain slot number of availability declaration in the relay chain
     pub(crate) slot: SlotNumber,
