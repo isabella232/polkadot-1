@@ -4,6 +4,7 @@
 //! invokations in this module, which 
 //!
 
+use core::{cmp::max, convert::TryFrom};
 use std::collections::{BTreeMap,HashSet};
 
 use crate::Error;
@@ -51,12 +52,8 @@ where C: Criteria, Assignment<C>: Position,
     }
 
     /// Iterate immutably over checkers.
-    fn range<T, R>(&self, r: R) -> impl Iterator<Item=&Assignment<C>>
-    where
-        // I'd expect DelayTranche: Borrow<T> implies T = DelayTranche by whatever.
-        DelayTranche: ::std::borrow::Borrow<T>, 
-        R: ::std::ops::RangeBounds<T>,
-        T: Ord + ?Sized, 
+    fn range<R>(&self, r: R) -> impl Iterator<Item=&Assignment<C>>
+    where R: ::std::ops::RangeBounds<DelayTranche>,
     {
         self.0.range(r).map( |(_,v)| v.iter() ).flatten()
     }
@@ -135,13 +132,45 @@ impl CandidateTracker {
         self.approved.insert(checker)
     }
 
-    pub fn is_approved(&self) -> bool {
-        unimplemented!()
+    fn count_approved_helper(&self,iter: impl Iterator<Item=ValidatorId>) -> usize 
+    {
+        let mut cm = HashSet::new();
+        for checker in iter {
+            if self.approved.contains(&checker) {  cm.insert(checker);  }
+        }
+        cm.len()
+    }
+
+    fn approval_by_relay_vrf<R>(&self, r: R) -> usize
+    where R: ::std::ops::RangeBounds<DelayTranche> + Clone
+    {
+        let x = self.relay_vrf_modulo.range(r.clone())  // Always delay_tranche=0
+            .map( |a| a.checker().clone() );
+        let y = self.relay_vrf_delay.range(r)  // Always delay_tranche=0
+            .map( |a| a.checker().clone() );
+        self.count_approved_helper( x.chain(y) )
+    }
+
+    fn approval_by_relay_equivocation<R>(&self, r: R) -> usize
+    where R: ::std::ops::RangeBounds<DelayTranche>
+    {
+        self.count_approved_helper( self.relay_equivocation.range(r).map( |a| a.checker().clone() ) )
+    }
+
+    pub fn is_approved_before(&self, delay: DelayTranche) -> bool {
+        self.approval_by_relay_vrf(0..delay)
+         < self.targets.relay_vrf_checkers as usize
+        &&
+        self.approval_by_relay_equivocation(0..delay)
+         < self.targets.relay_equivocation_checkers as usize
     }
 }
 
+
+
 pub struct Tracker {
     context: ApprovalContext,
+    current_slot: u64,
     relay_vrf_story: stories::RelayVRFStory,
     relay_equivocation_story: stories::RelayEquivocationStory,
     candidates: BTreeMap<ParaId,CandidateTracker>
@@ -149,13 +178,14 @@ pub struct Tracker {
 
 impl Tracker {
     pub fn new(context: ApprovalContext, target: u16) -> AssignmentResult<Tracker> {
+        let current_slot = context.anv_slot_number();
         // TODO: Improve `stories::*::new()` methods
         let header = unimplemented!();
         let relay_vrf_story = context.new_vrf_story(header,unimplemented!()) ?;
         let relay_equivocation_story = unimplemented!(); // stories::RelayEquivocationStory::new(header);
         let candidates = BTreeMap::default();
         // TODO: Add parachain candidates 
-        Ok(Tracker { context, relay_vrf_story, relay_equivocation_story, candidates, })
+        Ok(Tracker { context, current_slot, relay_vrf_story, relay_equivocation_story, candidates, })
     }
 
     fn access_story<C>(&self) -> &C::Story
@@ -185,7 +215,7 @@ impl Tracker {
 
     /// Read individual candidate's tracker
     ///
-    /// Useful for `is_approved` and `targets` methods of `CandidateTracker`.
+    /// Useful for `targets` and maybe `is_approved_before` methods of `CandidateTracker`.
     pub fn candidate(&self, paraid: &ParaId) -> AssignmentResult<&CandidateTracker>
     {
         self.candidates.get(paraid).ok_or(Error::BadAssignment("Invalid ParaId"))
@@ -199,9 +229,23 @@ impl Tracker {
         self.candidates.get_mut(paraid).ok_or(Error::BadAssignment("Invalid ParaId"))
     }
 
+    pub fn current_anv_slot(&self) -> u64 { self.current_slot }
+
+    pub fn increase_anv_slot(&mut self, slot: u64) {
+        self.current_slot = max(self.current_slot, slot);
+    }
+
+    pub fn delay(&self) -> DelayTranche {
+        let delay_bound: u32 = unimplemented!(); // TODO: num_validators? smaller?
+        let slot = self.current_slot.checked_sub( self.context.anv_slot_number() )
+            .expect("current_slot initialized to context.slot, qed");
+        u32::try_from( max(slot, delay_bound as u64) ).expect("just checked this, qed")
+    }
+
     /// Ask if all candidates are approved
     pub fn is_approved(&self) -> bool {
-        self.candidates.iter().all(|(_paraid,c)| c.is_approved())
+        let slot = self.delay();
+        self.candidates.iter().all(|(_paraid,c)| c.is_approved_before(slot))
     }
 }
 

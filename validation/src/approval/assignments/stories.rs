@@ -27,6 +27,8 @@ pub type SlotNumber = u64;
 pub type EpochNumber = u64;
 
 
+pub const ANV_SLOTS_PER_BP_SLOTS: u64 = 60; // = 6*10, so every 1/10th second
+
 /// Identifies the relay chain block in which we declared these
 /// parachain candidates to be availability 
 #[derive(PartialEq,Eq)]
@@ -39,10 +41,14 @@ pub struct ApprovalContext {
     pub(crate) hash: Hash,
     /// Block producer
     pub(crate) authority: ValidatorId,
-
 }
 
 impl ApprovalContext {
+    pub fn anv_slot_number(&self) -> SlotNumber {
+        self.slot.checked_mul(ANV_SLOTS_PER_BP_SLOTS)
+        .expect("Almost 2^60 seconds elapsed?!?")
+    }
+
     pub fn new(checker: ValidatorId) -> AssignmentResult<ApprovalContext> {
         let slot: u64 = unimplemented!();
         let epoch: u64 = unimplemented!();

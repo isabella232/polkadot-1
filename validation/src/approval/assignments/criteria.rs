@@ -204,8 +204,10 @@ pub struct AssignmentSigned<C: Criteria> {
 }
 
 impl<C: Criteria> AssignmentSigned<C> {
+    pub fn checker(&self) -> &ValidatorId { &self.checker }
+
     /// Get publickey identifying checker
-    pub fn checker(&self) -> AssignmentResult<PublicKey> {
+    fn checker_pk(&self) -> AssignmentResult<PublicKey> {
         use primitives::crypto::Public;
         PublicKey::from_bytes(&self.checker.to_raw_vec()) // Vec WTF?!?
         .map_err(|_| Error::BadAssignment("Bad VRF signature (bad publickey)"))
@@ -216,7 +218,7 @@ impl<C: Criteria> AssignmentSigned<C> {
      -> AssignmentResult<(&ApprovalContext,Assignment<C,ValidatorId>)> 
     {
         let AssignmentSigned { context, criteria, checker, vrf_preout, vrf_proof, } = self;
-        let checker_pk = self.checker() ?;
+        let checker_pk = self.checker_pk() ?;
         let vrf_inout = vrf::VRFOutput::from_bytes(vrf_preout)
             .expect("length enforced statically")
             .attach_input_hash(&checker_pk, criteria.vrf_input(story,0) ?)
