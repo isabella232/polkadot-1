@@ -5,7 +5,7 @@
 //!
 
 use core::{cmp::max, convert::TryFrom};
-use std::collections::{BTreeMap,HashSet};
+use std::collections::{BTreeMap, HashSet, HashMap, hash_map::Entry};
 
 use crate::Error;
 
@@ -15,49 +15,6 @@ use super::{
     criteria::{self, Assignment, AssignmentSigned, Criteria, Position},
     ValidatorId,
 };
-
-
-
-/// Assignments list sorted by their delay tranche
-///
-// #[derive(..)]
-struct AssignmentsByDelay<C: Criteria>(BTreeMap<DelayTranche,Vec< Assignment<C> >>);
-
-impl<C: Criteria> Default for AssignmentsByDelay<C> {
-    fn default() -> Self { AssignmentsByDelay(Default::default()) }
-}
-
-impl<C> AssignmentsByDelay<C> 
-where C: Criteria, Assignment<C>: Position,
-{    
-    fn bucket_mut(&mut self, delay_tranche: DelayTranche)
-     -> Option<&mut Vec< Assignment<C> >> 
-    {
-        self.0.get_mut(&delay_tranche)
-    }
-    
-    /// Add new `Assignment` avoiding inserting any duplicates.
-    ///
-    /// Assumes there is only one valid delay value determined by
-    /// some VRF output.
-    fn insert(&mut self, a: Assignment<C>) -> AssignmentResult<()> {
-        let mut v = self.0.entry(a.delay_tranche()).or_insert(Vec::new());
-        // We could improve performance here with `HashMap<ValidatorId,..>`
-        // but these buckets should stay small-ish due to using VRFs.
-        if v.iter().any( |a0| a0.checker() == a.checker() ) { 
-            return Err(Error::BadAssignment("Attempted insertion of duplicate ")); 
-        }
-        v.push(a);
-        Ok(())
-    }
-
-    /// Iterate immutably over checkers.
-    fn range<R>(&self, r: R) -> impl Iterator<Item=&Assignment<C>>
-    where R: ::std::ops::RangeBounds<DelayTranche>,
-    {
-        self.0.range(r).map( |(_,v)| v.iter() ).flatten()
-    }
-}
 
 
 /// Approvals target levels
@@ -83,6 +40,68 @@ impl Default for ApprovalsTargets {
 }
 
 
+/// Assignments list sorted by their delay tranche
+///
+// #[derive(..)]
+struct AssignmentsByDelay<C: Criteria>(BTreeMap<DelayTranche,Vec< Assignment<C> >>);
+
+impl<C: Criteria> Default for AssignmentsByDelay<C> {
+    fn default() -> Self { AssignmentsByDelay(Default::default()) }
+}
+
+impl<C> AssignmentsByDelay<C> 
+where C: Criteria, Assignment<C>: Position,
+{    
+    fn bucket_mut(&mut self, delay_tranche: DelayTranche)
+     -> Option<&mut Vec< Assignment<C> >> 
+    {
+        self.0.get_mut(&delay_tranche)
+    }
+    
+    /// Add new `Assignment` avoiding inserting any duplicates.
+    ///
+    /// Assumes there is only one valid delay value determined by
+    /// some VRF output.
+    fn insert(&mut self, a: Assignment<C>) -> AssignmentResult<DelayTranche> {
+        let delay_tranche = a.delay_tranche();
+        let mut v = self.0.entry(delay_tranche).or_insert(Vec::new());
+        // We could improve performance here with `HashMap<ValidatorId,..>`
+        // but these buckets should stay small-ish due to using VRFs.
+        if v.iter().any( |a0| a0.checker() == a.checker() ) { 
+            return Err(Error::BadAssignment("Attempted insertion of duplicate ")); 
+        }
+        // debug_assert!( !v.iter().any( |a0| a0.checker() == a.checker() ) );
+        v.push(a);
+        Ok(delay_tranche)
+    }
+
+    /// Iterate immutably over checkers.
+    fn range<R>(&self, r: R) -> impl Iterator<Item=&Assignment<C>>
+    where R: ::std::ops::RangeBounds<DelayTranche>,
+    {
+        self.0.range(r).map( |(_,v)| v.iter() ).flatten()
+    }
+}
+
+
+/// Current status of a checker with an assignemnt to this candidate.
+///
+/// We cannot store an `approved` state inside `AssignmentsByDelay`
+/// because we maybe recieve approval messages before the assignment
+/// message.  We thus need some extra checker tracking data structure,
+/// but two more options exist:
+///
+/// We could've one `HashSet<ValidatorId>` in `CandidateTracker` that
+/// track only the approvers, but doing this seems inflexible.
+///
+/// We could track an `Option<DelayTranche>` here, with `Some` for
+/// assigned checkers, and `None` for approving, but unasigned,
+/// but this complicates the code more than expected.
+struct CheckerStatus {
+    approved: bool,
+    // delay_tranche: Option<DelayTranche>,
+}
+
 #[derive(Default)]
 /// All assignments tracked for one specfic parachain cadidate.
 ///
@@ -90,7 +109,7 @@ impl Default for ApprovalsTargets {
 pub struct CandidateTracker {
     targets: ApprovalsTargets,
     /// Approval statments
-    approved: HashSet<ValidatorId>,
+    checkers: HashMap<ValidatorId,CheckerStatus>,
     /// Assignments of modulo type based on the relay chain VRF
     ///
     /// We only use `delay_tranche = 0` for `RelayVRFModulo`
@@ -117,26 +136,30 @@ impl CandidateTracker {
     /// Read current approvals checkers target levels
     pub fn targets(&self) -> &ApprovalsTargets { &self.targets }
 
+    /// Return whether the given validator approved this candiddate,
+    /// or `None` if we've no assignment form them.
+    pub fn is_approved_by_checker(&self, checker: &ValidatorId) -> Option<bool> {
+        self.checkers.get(checker).map(|status| status.approved)
+    }
+
     /// Mark validator as approving this candiddate
-    ///
-    /// We returns true if this freshly marks a new validator
-    /// as approving the candidate, and false if we already knew this
-    /// validator approved the andidate.  We do not consider duplicate
-    /// calls an error, but they might indicate a problem elsewhere
-    /// in the gossip system.
     ///
     /// We accept and correctly process premature approve calls, but
     /// our current scheme makes counting approvals slightly slower.
     /// We can optimize performance later with slightly more complex code.
-    pub fn approve(&mut self, checker: ValidatorId) -> bool {
-        self.approved.insert(checker)
+    // TODO: Should we return anything?
+    pub fn approve(&mut self, checker: ValidatorId) {
+        match self.checkers.entry(checker) {
+            Entry::Occupied(mut e) => e.get_mut().approved = true,
+            Entry::Vacant(mut e) => { e.insert(CheckerStatus { approved: true, }); },
+        }
     }
 
     fn count_approved_helper(&self,iter: impl Iterator<Item=ValidatorId>) -> usize 
     {
         let mut cm = HashSet::new();
         for checker in iter {
-            if self.approved.contains(&checker) {  cm.insert(checker);  }
+            if Some(true) == self.is_approved_by_checker(&checker) {  cm.insert(checker);  }
         }
         cm.len()
     }
@@ -207,10 +230,12 @@ impl Tracker {
             return Err(Error::BadAssignment("Incorrect ApprovalContext"));
         }
         let paraid = a.paraid(context) ?;
-        self.candidates.entry(paraid)
-        .or_insert(CandidateTracker::default())
-        .access_criteria_mut::<C>()
-        .insert(a)
+        let candidate = self.candidates.entry(paraid).or_insert(CandidateTracker::default());
+
+        let checker = a.checker().clone();
+        candidate.access_criteria_mut::<C>().insert(a) ?;
+        candidate.checkers.entry(checker).or_insert(CheckerStatus { approved: false });
+        Ok(())        
     }
 
     /// Read individual candidate's tracker
