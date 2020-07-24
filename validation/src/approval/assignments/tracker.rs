@@ -4,7 +4,7 @@
 //! invokations in this module, which 
 //!
 
-use core::{cmp::max, convert::TryFrom};
+use core::{ cmp::max, convert::TryFrom, ops::{Deref, DerefMut} };
 use std::collections::{BTreeMap, HashSet, HashMap, hash_map::Entry};
 
 use crate::Error;
@@ -90,16 +90,17 @@ where C: Criteria, Assignment<C>: Position,
 /// We cannot store an `approved` state inside `AssignmentsByDelay`
 /// because we maybe recieve approval messages before the assignment
 /// message.  We thus need some extra checker tracking data structure,
-/// but two more options exist:
-///
-/// We could've one `HashSet<ValidatorId>` in `CandidateTracker` that
-/// track only the approvers, but doing this seems inflexible.
+/// but more options exist:
 ///
 /// We could track an `Option<DelayTranche>` here, with `Some` for
 /// assigned checkers, and `None` for approving, but unasigned,
 /// but this complicates the code more than expected.
 struct CheckerStatus {
+    /// Is this assignment approved?
     approved: bool,
+    /// Is this my own assignment?
+    mine: bool,
+    // /// Improve lookup times, `None` if approved without existing assignment.
     // delay_tranche: Option<DelayTranche>,
 }
 
@@ -151,15 +152,29 @@ impl CandidateTracker {
 
     /// Mark validator as approving this candiddate
     ///
+    /// We cannot expose approving my own candidates from the `Tracker`
+    /// because they require additional work.
+    pub(super) fn approve(&mut self, checker: ValidatorId, mine: bool) -> AssignmentResult<()> {
+        match self.checkers.entry(checker) {
+            Entry::Occupied(mut e) => { 
+                let e = e.get_mut();
+                if e.mine != mine {
+                    return Err(Error::BadAssignment("Attempted to approve my own assignment from Tracker or visa versa!"));
+                }
+                e.approved = true;
+            },
+            Entry::Vacant(mut e) => { e.insert(CheckerStatus { approved: true, mine: false, }); },
+        }
+        Ok(())
+    }
+
+    /// Mark another validator as approving this candiddate
+    ///
     /// We accept and correctly process premature approve calls, but
     /// our current scheme makes counting approvals slightly slower.
     /// We can optimize performance later with slightly more complex code.
-    // TODO: Should we return anything?
-    pub fn approve(&mut self, checker: ValidatorId) {
-        match self.checkers.entry(checker) {
-            Entry::Occupied(mut e) => e.get_mut().approved = true,
-            Entry::Vacant(mut e) => { e.insert(CheckerStatus { approved: true, }); },
-        }
+    pub fn approve_others(&mut self, checker: ValidatorId) -> AssignmentResult<()> {
+        self.approve(checker, false)
     }
 
     fn count_approved_helper(&self,iter: impl Iterator<Item=ValidatorId>) -> usize 
@@ -227,6 +242,21 @@ impl Tracker {
         .expect("Oops, we've some foreign type as Criteria::Story!")
     }
 
+    /// Insert assignment verified elsewhere
+    pub(super) fn insert<C>(&mut self, a: Assignment<C>, mine: bool) -> AssignmentResult<()> 
+    where C: Criteria, Assignment<C>: Position,
+    {
+        let checker = a.checker().clone();
+        let paraid = a.paraid(&self.context) ?;
+        let candidate = self.candidates.entry(paraid).or_insert(CandidateTracker::default());
+        if let Some(cs) = candidate.checkers.get(&checker) { if cs.mine != mine {
+            return Err(Error::BadAssignment("Attempted to verify my own assignment!"));
+        } }
+        candidate.access_criteria_mut::<C>().insert(a) ?;
+        candidate.checkers.entry(checker).or_insert(CheckerStatus { approved: false, mine, });
+        Ok(())        
+    }
+
     /// Insert an assignment after verifying its signature 
     pub(super) fn verify_and_insert<C>(&mut self, story: &C::Story, a: &AssignmentSigned<C>)
      -> AssignmentResult<()> 
@@ -236,13 +266,7 @@ impl Tracker {
         if *context != self.context { 
             return Err(Error::BadAssignment("Incorrect ApprovalContext"));
         }
-        let paraid = a.paraid(context) ?;
-        let candidate = self.candidates.entry(paraid).or_insert(CandidateTracker::default());
-
-        let checker = a.checker().clone();
-        candidate.access_criteria_mut::<C>().insert(a) ?;
-        candidate.checkers.entry(checker).or_insert(CheckerStatus { approved: false });
-        Ok(())        
+        self.insert(a,false)
     }
 
     /// Read individual candidate's tracker
@@ -256,16 +280,11 @@ impl Tracker {
     /// Access individual candidate's tracker mutably
     ///
     /// Useful for `approve` method of `CandidateTracker`.
-    pub fn candidate_mut(&mut self, paraid: &ParaId) -> AssignmentResult<&mut CandidateTracker>
-    {
+    pub fn candidate_mut(&mut self, paraid: &ParaId) -> AssignmentResult<&mut CandidateTracker> {
         self.candidates.get_mut(paraid).ok_or(Error::BadAssignment("Invalid ParaId"))
     }
 
     pub fn current_anv_slot(&self) -> u64 { self.current_slot }
-
-    pub fn increase_anv_slot(&mut self, slot: u64) {
-        self.current_slot = max(self.current_slot, slot);
-    }
 
     pub fn delay(&self) -> DelayTranche {
         let delay_bound: u32 = unimplemented!(); // TODO: num_validators? smaller?
@@ -281,3 +300,27 @@ impl Tracker {
     }
 }
 
+
+/// Only tracks others assignments and approvals
+pub struct Watcher {
+    tracker: Tracker,
+}
+
+impl Deref for Watcher {
+    type Target = Tracker;
+    fn deref(&self) -> &Tracker { &self.tracker }
+}
+impl DerefMut for Watcher {
+    fn deref_mut(&mut self) -> &mut Tracker { &mut self.tracker }
+}
+
+impl Watcher {
+    /// Identify the given tracker as only tracking others' assignments and approvals
+    fn new(tracker: Tracker) -> Watcher {
+        Watcher { tracker } 
+    }
+
+    pub fn increase_anv_slot(&mut self, slot: u64) {
+        self.tracker.current_slot = max(self.tracker.current_slot, slot);
+    }
+}
