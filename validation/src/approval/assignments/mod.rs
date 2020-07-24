@@ -16,6 +16,7 @@ pub type AssignmentResult<T> = Result<T,Error>;
 pub mod stories;
 pub mod criteria;
 pub mod tracker;
+pub mod announcer;
 
 
 pub use stories::ApprovalContext;

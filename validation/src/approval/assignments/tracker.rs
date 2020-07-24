@@ -40,10 +40,11 @@ impl Default for ApprovalsTargets {
 }
 
 
-/// Assignments list sorted by their delay tranche
+/// Verified assignments sorted by their delay tranche
 ///
 // #[derive(..)]
-struct AssignmentsByDelay<C: Criteria>(BTreeMap<DelayTranche,Vec< Assignment<C> >>);
+struct AssignmentsByDelay<C: Criteria, K = criteria::AssignmentSignature>
+    (BTreeMap<DelayTranche,Vec< Assignment<C,K> >>);
 
 impl<C: Criteria> Default for AssignmentsByDelay<C> {
     fn default() -> Self { AssignmentsByDelay(Default::default()) }
@@ -127,14 +128,20 @@ impl CandidateTracker {
     where C: Criteria, Assignment<C>: Position,
     {
         use core::any::Any;
-        (&mut self.relay_vrf_modulo as &mut dyn Any).downcast_mut::<AssignmentsByDelay<C>>()
-        .or( (&mut self.relay_vrf_delay as &mut dyn Any).downcast_mut::<AssignmentsByDelay<C>>() )
-        .or( (&mut self.relay_equivocation as &mut dyn Any).downcast_mut::<AssignmentsByDelay<C>>() )
+        (&mut self.relay_vrf_modulo as &mut dyn Any)
+        .downcast_mut::<AssignmentsByDelay<C>>()
+        .or( (&mut self.relay_vrf_delay as &mut dyn Any)
+             .downcast_mut::<AssignmentsByDelay<C>>() )
+        .or( (&mut self.relay_equivocation as &mut dyn Any)
+             .downcast_mut::<AssignmentsByDelay<C>>() )
         .expect("Oops, we've some foreign type satisfying Criteria!")
     }
 
     /// Read current approvals checkers target levels
     pub fn targets(&self) -> &ApprovalsTargets { &self.targets }
+
+    // /// Write current approvals checkers target levels
+    // pub fn targets_mut(&self) -> &mut ApprovalsTargets { &mut self.targets }
 
     /// Return whether the given validator approved this candiddate,
     /// or `None` if we've no assignment form them.
