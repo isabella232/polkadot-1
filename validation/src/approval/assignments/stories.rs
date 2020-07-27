@@ -27,7 +27,7 @@ pub type SlotNumber = u64;
 pub type EpochNumber = u64;
 
 
-pub const ANV_SLOTS_PER_BP_SLOTS: u64 = 60; // = 6*10, so every 1/10th second
+pub const ANV_SLOTS_PER_BP_SLOTS: u64 = 12; // = 6*2, so every half second
 
 /// Identifies the relay chain block in which we declared these
 /// parachain candidates to be availability 
