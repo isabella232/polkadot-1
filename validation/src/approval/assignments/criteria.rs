@@ -260,10 +260,16 @@ impl<C: Criteria> AssignmentSigned<C> {
 
 /// We require `Assignment<C,K>` methods generic over `C`
 /// that position this assignment inside the assignment tracker
+///
+/// We pass `ApprovalContext` into both methods for availability core
+/// information.  We need each cores' paraid assignment for `paraid`
+/// of course, but `delay_tranche` only requires the approximate
+/// number of availability cores, so we might avoid passing it there
+/// in future once that number solidifies.
 pub(super) trait Position {
     /// Assignment's  our `ParaId` from allowed `ParaId` returnned by
     /// `stories::allowed_paraids`.
-    fn paraid(&self, context: &ApprovalContext) -> AssignmentResult<ParaId>;
+    fn paraid(&self, context: &ApprovalContext) -> Option<ParaId>;
 
     /// Always assign `RelayVRFModulo` the zeroth delay tranche
     fn delay_tranche(&self, context: &ApprovalContext) -> DelayTranche { 0 }
@@ -272,13 +278,13 @@ pub(super) trait Position {
 impl<K> Position for Assignment<RelayVRFModulo,K> {
     /// Assign our `ParaId` from allowed `ParaId` returnned by
     /// `stories::allowed_paraids`.
-    fn paraid(&self, context: &ApprovalContext) -> AssignmentResult<ParaId> {
+    fn paraid(&self, context: &ApprovalContext) -> Option<ParaId> {
         // TODO: Optimize accessing this from `ApprovalContext`
-        let paraids = context.allowed_paraids();
+        let paraids = context.paraids_by_core();
         // We use u64 here to give a reasonable distribution modulo the number of parachains
         let mut parachain = u64::from_le_bytes(self.vrf_inout.make_bytes::<[u8; 8]>(b"parachain"));
         parachain %= paraids.len() as u64;  // assumes usize < u64
-        Ok(paraids[parachain as usize])
+        paraids[parachain as usize]
     }
 
     /// Always assign `RelayVRFModulo` the zeroth delay tranche
@@ -296,9 +302,9 @@ pub trait DelayCriteria : Criteria {
     /// We consolodate this many plus one delays at tranche zero, 
     /// ensuring they always run their checks.
     fn zeroth_delay_tranche_width() -> DelayTranche;
-    /// We set two delay tranches per paraid so that each tranche expects
+    /// We set two delay tranches per core so that each tranche expects
     /// half as many checkers as the number of backing checkers.
-    fn delay_tranches_per_allowed_paraid() -> DelayTranche { 2 }
+    fn delay_tranches_per_core() -> DelayTranche { 2 }
 }
 impl DelayCriteria for RelayVRFDelay {
     fn paraid(&self) -> ParaId { self.paraid }
@@ -326,21 +332,21 @@ impl DelayCriteria for RelayEquivocation {
 impl<C,K> Position for Assignment<C,K> where C: DelayCriteria {
     /// Assign our `ParaId` from the one explicitly stored, but error 
     /// if disallowed by `stories::allowed_paraids`.
-    fn paraid(&self, context: &ApprovalContext) -> AssignmentResult<ParaId> {
+    ///
+    /// Errors if the paraid is not declared available here.
+    fn paraid(&self, context: &ApprovalContext) -> Option<ParaId> {
         use core::ops::Deref;
         let paraid = self.criteria.paraid();
-        context.allowed_paraids().deref()
-        .binary_search(&paraid)
-        .map(|_| paraid)
-        .map_err(|_| Error::BadAssignment("RelayEquivocation has bad ParaId"))
+        // TODO:  Speed up!  Cores are not sorted so no binary_search here
+        if ! context.paraids_by_core().deref().contains(&Some(paraid)) { return None; }
+        Some(paraid)
     }
 
     /// Assign our delay using our VRF output
     fn delay_tranche(&self, context: &ApprovalContext) -> DelayTranche {
-        let delay_tranche_modulus = u32::try_from( context.allowed_paraids().len() )
-        .expect("We cannot support terabyte block sizes, qed")
-        .saturating_mul( C::delay_tranches_per_allowed_paraid() )
-        .saturating_add( C::zeroth_delay_tranche_width() );
+        let delay_tranche_modulus = context.num_cores() 
+            .saturating_mul( C::delay_tranches_per_core() )
+            .saturating_add( C::zeroth_delay_tranche_width() );
         // We use u64 here to give a reasonable distribution modulo the number of tranches
         let mut delay_tranche = u64::from_le_bytes(self.vrf_inout.make_bytes::<[u8; 8]>(b"tranche"));
         delay_tranche %= delay_tranche_modulus as u64;

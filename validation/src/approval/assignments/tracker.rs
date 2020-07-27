@@ -252,7 +252,8 @@ impl Tracker {
     where C: Criteria, Assignment<C>: Position,
     {
         let checker = a.checker().clone();
-        let paraid = a.paraid(&self.context) ?;
+        let paraid = a.paraid(&self.context)
+            .ok_or(Error::BadAssignment("Insert attempted on missing ParaId.")) ?;
         let candidate = self.candidates.entry(paraid).or_insert(CandidateTracker::default());
         if let Some(cs) = candidate.checkers.get(&checker) { if cs.mine != mine {
             return Err(Error::BadAssignment("Attempted to verify my own assignment!"));

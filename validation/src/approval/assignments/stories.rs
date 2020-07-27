@@ -71,13 +71,34 @@ impl ApprovalContext {
         unimplemented!()
     }
 
-    /// All parachain/thread ids permitted in the given `epoch` and `slot`.
+    /// Assignments of `ParaId` to ailability cores for the current
+    /// `epoch` and `slot`.
+    /// 
+    /// We suggest any full parachains have their cores allocated by
+    /// the epoch randomness from BABE, so parachain cores should be
+    /// allocated using a permutation, maybe Fisher-Yates shuffle,
+    /// seeded by the hash of the babe_epoch_randomness and the
+    /// slot divided by some small constant.
     ///
-    /// We expect results to depend upon the chain state two epochs before
-    /// `epoch` and optionally upon `slot`, but more recent dependencies
-    /// within the epochs `epoch` or `epoch-1` require analysis.
-    pub(super) fn allowed_paraids(&self) -> Arc<[ParaId]> {
+    /// We do not minimize aversarial manipulation for parathreads
+    /// similarly however because we operate under the assumption
+    /// that an adversary with enough checkers for an attack should
+    /// possess block production capability for most parachains.
+    /// We still favor scheduling parathreads onto availability cores
+    /// earlier rather than later however.
+    // TODO:  Rename to `newly_available_paraids_by_core`?
+    pub(super) fn paraids_by_core(&self) -> Arc<[Option<ParaId>]> {
         unimplemented!()
+    }
+
+    /// Availability core supply
+    ///
+    /// Always cequals `self.paraids_by_core().len()`
+    /// and remains constant within an epoch.
+    pub fn num_cores(&self) -> u32 {
+        use core::convert::TryFrom;
+        u32::try_from( self.paraids_by_core().len() )
+        .expect("We cannot support terabyte block sizes, qed")
     }
 
     /// Fetch full epoch data from self.epoch
