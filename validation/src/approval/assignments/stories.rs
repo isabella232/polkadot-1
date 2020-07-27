@@ -126,11 +126,10 @@ impl ApprovalContext {
 
         let vrf_preout = unimplemented!();
         let vrf_io = if let Some(pr) = proof {
-            unimplemented!(); // TODO: Verify that we imported this block
             publickey.vrf_verify(vrf_t,vrf_preout,pr)
             .map_err(|_| Error::BadStory("Relay chain block VRF failed validation")) ?.0
         } else {
-            unimplemented!(); // TODO: Verify that we imported this block
+            unimplemented!(); // TODO: Verify that we imported this block?
             vrf_preout.attach_input_hash(&publickey,vrf_t)
             .map_err(|_| Error::BadStory("Relay chain block with invalid VRF PreOutput")) ?
         };

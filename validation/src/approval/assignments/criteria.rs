@@ -53,8 +53,8 @@ pub trait Criteria : Clone + 'static {
 
     /// Write the transcript from which build the VRF input.  
     ///
-    /// Errors if Any errors indicate 
-    fn vrf_input(&self, story: &Self::Story, sample: u16) -> AssignmentResult<Transcript>;
+    /// Cannot error unless `Criteria = RelayEquivocation`
+    fn vrf_input(&self, story: &Self::Story) -> AssignmentResult<Transcript>;
 
     /// Initialize the transcript for our Schnorr DLEQ proof.
     ///
@@ -73,18 +73,19 @@ pub trait Criteria : Clone + 'static {
 /// number of parachains.
 #[derive(Clone)]
 pub struct RelayVRFModulo {
+    pub(crate) sample: u16,
     // Story::anv_rc_vrf_source
 }
 
 impl Criteria for RelayVRFModulo {
     type Story = stories::RelayVRFStory;
 
-    /// Panics if the relay chain block has an invalid Ristretto point as VRF pre-output.
-    /// If this happenes then polkadot must shut down for repars and fork anyways.
-    fn vrf_input(&self, story: &Self::Story, sample: u16) -> AssignmentResult<Transcript> {
-        if sample > 0 { return Err(Error::BadAssignment("RelayVRFModulo does not yet support additional samples")); }
+    /// Never errors.
+    fn vrf_input(&self, story: &Self::Story) -> AssignmentResult<Transcript> {
+        if self.sample > 0 { return Err(Error::BadAssignment("RelayVRFModulo does not yet support additional samples")); }
         let mut t = Transcript::new(b"Approval Assignment VRF");
         t.append_message(b"RelayVRFModulo", &story.anv_rc_vrf_source );
+        t.append_u64(b"RelayVRFModulo", self.sample.into() );
         Ok(t)
     }
 }
@@ -104,13 +105,8 @@ pub struct RelayVRFDelay {
 impl Criteria for RelayVRFDelay {
     type Story = stories::RelayVRFStory;
 
-    /// Panics if the relay chain block has an invalid Ristretto point as VRF pre-output.
-    /// If this happenes then polkadot must shut down for repars and fork anyways.
-    fn vrf_input(&self, story: &Self::Story, sample: u16) -> AssignmentResult<Transcript> {
-        if sample > 0 {
-            // TODO: Is this really a BadAssignment or a BadStory or something else?
-            return Err(Error::BadAssignment("RelayVRFDelay cannot ever support additional samples")); 
-        }
+    /// Never errors
+    fn vrf_input(&self, story: &Self::Story) -> AssignmentResult<Transcript> {
         let mut t = Transcript::new(b"Approval Assignment VRF");
         t.append_message(b"RelayVRFDelay", &story.anv_rc_vrf_source );
         t.append_u64(b"ParaId", u32::from(self.paraid).into() );
@@ -136,11 +132,7 @@ impl Criteria for RelayEquivocation {
     /// additional approval checks triggered by relay chain equivocations.
     ///
     /// Errors if paraid does not yet count as a candidate equivocation 
-    fn vrf_input(&self, story: &Self::Story, sample: u16) -> AssignmentResult<Transcript> {
-        if sample > 0 {
-            // TODO: Is this really a BadAssignment or a BadStory or something else?
-            return Err(Error::BadAssignment("RelayVRFDelay cannot ever support additional samples")); 
-        }
+    fn vrf_input(&self, story: &Self::Story) -> AssignmentResult<Transcript> {
         let h = story.candidate_equivocations.get(&self.paraid)
             .ok_or(Error::BadStory("Not a candidate equivocation")) ?;
         let mut t = Transcript::new(b"Approval Assignment VRF");
@@ -169,7 +161,7 @@ pub struct Assignment<C: Criteria, K = AssignmentSignature> {
     vrf_inout: vrf::VRFInOut,
 }
 
-impl<C> Assignment<C,AssignmentSignature> where C: Criteria {
+impl<C> Assignment<C> where C: Criteria {
     /// Identify the checker
     pub fn checker(&self) -> &ValidatorId { &self.vrf_signature.checker }
 
@@ -188,7 +180,7 @@ impl<C> Assignment<C,()> where C: Criteria {
     /// Create our own `Assignment` for the given criteria, story,
     /// and our keypair, by constructing its `VRFInOut`.
     pub fn create(criteria: C, story: &C::Story, checker: &Keypair) -> AssignmentResult<Assignment<C,()>> {
-        let vrf_inout = checker.borrow().vrf_create_hash(criteria.vrf_input(story,0) ?);
+        let vrf_inout = checker.borrow().vrf_create_hash(criteria.vrf_input(story) ?);
         Ok(Assignment { criteria, vrf_signature: (), vrf_inout, })
     }
 
@@ -198,16 +190,15 @@ impl<C> Assignment<C,()> where C: Criteria {
     /// the `checker` argument here, and making `K=Arc<Keypair>` work,
     /// except `Assignment`s always occur with so much repetition that
     /// passing the `Keypair` again makes more sense.
-    pub fn sign(&self, context: ApprovalContext, checker: &Keypair) -> AssignmentSigned<C> {
+    pub fn sign(self, context: ApprovalContext, checker: &Keypair) -> Assignment<C> {
+        let Assignment { criteria, vrf_signature: (), vrf_inout } = self;
         // Must exactly mirror `schnorrkel::Keypair::vrf_sign_extra`
         // or else rerun one point multiplicaiton in vrf_create_hash
-        let t = self.criteria.extra(&context);
-        let vrf_proof = checker.dleq_proove(t, &self.vrf_inout, vrf::KUSAMA_VRF).0.to_bytes();
-        let vrf_preout = self.vrf_inout.to_output().to_bytes();
+        let t = criteria.extra(&context);
+        let vrf_proof = checker.dleq_proove(t, &vrf_inout, vrf::KUSAMA_VRF).0.to_bytes();
         let checker = validator_id_from_key(&checker.public);
-        let criteria = self.criteria.clone();
         let vrf_signature = AssignmentSignature { checker, vrf_proof, };
-        AssignmentSigned { context, criteria, vrf_preout, vrf_signature, }
+        Assignment { criteria, vrf_signature, vrf_inout, }
     }
 }
 
@@ -246,7 +237,7 @@ impl<C: Criteria> AssignmentSigned<C> {
         let checker_pk = self.checker_pk() ?;
         let vrf_inout = vrf::VRFOutput::from_bytes(vrf_preout)
             .expect("length enforced statically")
-            .attach_input_hash(&checker_pk, criteria.vrf_input(story,0) ?)
+            .attach_input_hash(&checker_pk, criteria.vrf_input(story) ?)
             .map_err(|_| Error::BadAssignment("Bad VRF signature (bad pre-output)")) ?;
         let vrf_proof = vrf::VRFProof::from_bytes(&vrf_signature.vrf_proof)
             .map_err(|_| Error::BadAssignment("Bad VRF signature (bad proof)")) ?;

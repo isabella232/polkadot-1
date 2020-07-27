@@ -4,7 +4,7 @@
 //! invokations in this module, which 
 //!
 
-use core::{ cmp::max, convert::TryFrom, ops::{Deref, DerefMut} };
+use core::{ cmp::max, convert::TryFrom, ops, };
 use std::collections::{BTreeMap, HashSet, HashMap, hash_map::Entry};
 
 use crate::Error;
@@ -43,7 +43,7 @@ impl Default for ApprovalsTargets {
 /// Verified assignments sorted by their delay tranche
 ///
 // #[derive(..)]
-struct AssignmentsByDelay<C: Criteria, K = criteria::AssignmentSignature>
+pub(super) struct AssignmentsByDelay<C: Criteria, K = criteria::AssignmentSignature>
     (BTreeMap<DelayTranche,Vec< Assignment<C,K> >>);
 
 impl<C: Criteria> Default for AssignmentsByDelay<C> {
@@ -213,6 +213,10 @@ impl CandidateTracker {
 
 
 
+/// Tracks approval checkers assignments
+///
+/// Inner type and builder for `Watcher` and `Announcer`, which
+/// provide critical methods unavailable on `Tracker` alone.
 pub struct Tracker {
     context: ApprovalContext,
     current_slot: u64,
@@ -243,12 +247,7 @@ impl Tracker {
     }
 
     /// Insert assignment verified elsewhere
-    pub(super) fn insert<C>(
-        &mut self, 
-        a: Assignment<C>, 
-        context: &ApprovalContext, 
-        mine: bool
-    ) -> AssignmentResult<()> 
+    pub(super) fn insert<C>(&mut self, a: Assignment<C>, mine: bool) -> AssignmentResult<()> 
     where C: Criteria, Assignment<C>: Position,
     {
         let checker = a.checker().clone();
@@ -258,13 +257,13 @@ impl Tracker {
         if let Some(cs) = candidate.checkers.get(&checker) { if cs.mine != mine {
             return Err(Error::BadAssignment("Attempted to verify my own assignment!"));
         } }
-        candidate.access_criteria_mut::<C>().insert(a,context) ?;
+        candidate.access_criteria_mut::<C>().insert(a,&self.context) ?;
         candidate.checkers.entry(checker).or_insert(CheckerStatus { approved: false, mine, });
         Ok(())        
     }
 
     /// Insert an assignment after verifying its signature 
-    pub(super) fn verify_and_insert<C>(&mut self, story: &C::Story, a: &AssignmentSigned<C>)
+    pub(super) fn verify_and_insert<C>(&mut self, a: &AssignmentSigned<C>)
      -> AssignmentResult<()> 
     where C: Criteria, Assignment<C>: Position,
     {
@@ -272,7 +271,7 @@ impl Tracker {
         if *context != self.context { 
             return Err(Error::BadAssignment("Incorrect ApprovalContext"));
         }
-        self.insert(a,context,false)
+        self.insert(a,false)
     }
 
     /// Read individual candidate's tracker
@@ -304,28 +303,30 @@ impl Tracker {
         let slot = self.delay();
         self.candidates.iter().all(|(_paraid,c)| c.is_approved_before(slot))
     }
+
+    /// Initalize tracking others assignments and approvals
+    /// without creating assignments ourself.
+    pub fn into_watcher(self) -> Watcher {
+        Watcher { tracker: self } 
+    }
 }
 
 
-/// Only tracks others assignments and approvals
+/// Tracks only others assignments and approvals
 pub struct Watcher {
     tracker: Tracker,
 }
 
-impl Deref for Watcher {
+impl ops::Deref for Watcher {
     type Target = Tracker;
     fn deref(&self) -> &Tracker { &self.tracker }
 }
-impl DerefMut for Watcher {
+impl ops::DerefMut for Watcher {
     fn deref_mut(&mut self) -> &mut Tracker { &mut self.tracker }
 }
 
 impl Watcher {
-    /// Identify the given tracker as only tracking others' assignments and approvals
-    fn new(tracker: Tracker) -> Watcher {
-        Watcher { tracker } 
-    }
-
+    /// 
     pub fn increase_anv_slot(&mut self, slot: u64) {
         self.tracker.current_slot = max(self.tracker.current_slot, slot);
     }
