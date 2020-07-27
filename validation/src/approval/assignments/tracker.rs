@@ -63,8 +63,8 @@ where C: Criteria, Assignment<C>: Position,
     ///
     /// Assumes there is only one valid delay value determined by
     /// some VRF output.
-    fn insert(&mut self, a: Assignment<C>) -> AssignmentResult<DelayTranche> {
-        let delay_tranche = a.delay_tranche();
+    fn insert(&mut self, a: Assignment<C>, context: &ApprovalContext) -> AssignmentResult<DelayTranche> {
+        let delay_tranche = a.delay_tranche(context);
         let mut v = self.0.entry(delay_tranche).or_insert(Vec::new());
         // We could improve performance here with `HashMap<ValidatorId,..>`
         // but these buckets should stay small-ish due to using VRFs.
@@ -243,7 +243,12 @@ impl Tracker {
     }
 
     /// Insert assignment verified elsewhere
-    pub(super) fn insert<C>(&mut self, a: Assignment<C>, mine: bool) -> AssignmentResult<()> 
+    pub(super) fn insert<C>(
+        &mut self, 
+        a: Assignment<C>, 
+        context: &ApprovalContext, 
+        mine: bool
+    ) -> AssignmentResult<()> 
     where C: Criteria, Assignment<C>: Position,
     {
         let checker = a.checker().clone();
@@ -252,7 +257,7 @@ impl Tracker {
         if let Some(cs) = candidate.checkers.get(&checker) { if cs.mine != mine {
             return Err(Error::BadAssignment("Attempted to verify my own assignment!"));
         } }
-        candidate.access_criteria_mut::<C>().insert(a) ?;
+        candidate.access_criteria_mut::<C>().insert(a,context) ?;
         candidate.checkers.entry(checker).or_insert(CheckerStatus { approved: false, mine, });
         Ok(())        
     }
@@ -266,7 +271,7 @@ impl Tracker {
         if *context != self.context { 
             return Err(Error::BadAssignment("Incorrect ApprovalContext"));
         }
-        self.insert(a,false)
+        self.insert(a,context,false)
     }
 
     /// Read individual candidate's tracker

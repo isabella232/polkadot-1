@@ -8,7 +8,7 @@
 //! using `vrf::vrf_merge`, which requires `Vec<..>`s for
 //! `AssignmentSigned::vrf_preout` and `Assignment::vrf_inout`.
 
-use core::borrow::Borrow;
+use core::{borrow::Borrow, convert::TryFrom};
 
 use merlin::Transcript;
 use schnorrkel::{PublicKey, PUBLIC_KEY_LENGTH, Keypair, vrf};
@@ -266,7 +266,7 @@ pub(super) trait Position {
     fn paraid(&self, context: &ApprovalContext) -> AssignmentResult<ParaId>;
 
     /// Always assign `RelayVRFModulo` the zeroth delay tranche
-    fn delay_tranche(&self) -> DelayTranche { 0 }
+    fn delay_tranche(&self, context: &ApprovalContext) -> DelayTranche { 0 }
 }
 
 impl<K> Position for Assignment<RelayVRFModulo,K> {
@@ -282,7 +282,7 @@ impl<K> Position for Assignment<RelayVRFModulo,K> {
     }
 
     /// Always assign `RelayVRFModulo` the zeroth delay tranche
-    fn delay_tranche(&self) -> DelayTranche { 0 }
+    fn delay_tranche(&self, _context: &ApprovalContext) -> DelayTranche { 0 }
 }
 
 
@@ -293,24 +293,34 @@ impl<K> Position for Assignment<RelayVRFModulo,K> {
 pub trait DelayCriteria : Criteria {
     /// All delay based assignment criteria contain an explicit paraid
     fn paraid(&self) -> ParaId;
-    /// We consolodate this many plus one delays at tranche zero, ensuring they always run.
+    /// We consolodate this many plus one delays at tranche zero, 
+    /// ensuring they always run their checks.
     fn zeroth_delay_tranche_width() -> DelayTranche;
-    /// 
-    fn max_delay_tranche() -> DelayTranche { 128 }
+    /// We set two delay tranches per paraid so that each tranche expects
+    /// half as many checkers as the number of backing checkers.
+    fn delay_tranches_per_allowed_paraid() -> DelayTranche { 2 }
 }
 impl DelayCriteria for RelayVRFDelay {
     fn paraid(&self) -> ParaId { self.paraid }
-    /// We do not require any delay zero tranches thanks to `RelayVRFModulo`,
-    /// but our simple impl for `Position::delay_tranche` still imposes one. 
-    fn zeroth_delay_tranche_width() -> DelayTranche { 0 }
+    /// We do not techncially require delay tranche zero checkers here
+    /// thanks to `RelayVRFModulo`, but they help us tune the expected
+    /// checkers, and our simple impl for `Position::delay_tranche`
+    /// imposes at least one tranche worth.
+    ///
+    /// If security dictates more zeroth delay checkers then we prefer
+    /// adding allocations by `RelayVRFModulo` instead.
+    fn zeroth_delay_tranche_width() -> DelayTranche { 0 } // 1
 }
 impl DelayCriteria for RelayEquivocation {
     fn paraid(&self) -> ParaId { self.paraid }
+    /// Allocates an expected four times the number of backing checkers
+    /// into delay tranch zero, so that they always check.
+    ///
     /// We do need some consolodation at zero for `RelayEquivocation`.
     /// We considered some modulo condition using relay chain block hashes,
     /// except we're already slashing someone for equivocation, so being
     /// less efficent hurts less than the extra code complexity.
-    fn zeroth_delay_tranche_width() -> DelayTranche { 8 }
+    fn zeroth_delay_tranche_width() -> DelayTranche { 7 } // 8
 }
 
 impl<C,K> Position for Assignment<C,K> where C: DelayCriteria {
@@ -326,8 +336,11 @@ impl<C,K> Position for Assignment<C,K> where C: DelayCriteria {
     }
 
     /// Assign our delay using our VRF output
-    fn delay_tranche(&self) -> DelayTranche {
-        let delay_tranche_modulus = C::max_delay_tranche() + C::zeroth_delay_tranche_width();
+    fn delay_tranche(&self, context: &ApprovalContext) -> DelayTranche {
+        let delay_tranche_modulus = u32::try_from( context.allowed_paraids().len() )
+        .expect("We cannot support terabyte block sizes, qed")
+        .saturating_mul( C::delay_tranches_per_allowed_paraid() )
+        .saturating_add( C::zeroth_delay_tranche_width() );
         // We use u64 here to give a reasonable distribution modulo the number of tranches
         let mut delay_tranche = u64::from_le_bytes(self.vrf_inout.make_bytes::<[u8; 8]>(b"tranche"));
         delay_tranche %= delay_tranche_modulus as u64;
