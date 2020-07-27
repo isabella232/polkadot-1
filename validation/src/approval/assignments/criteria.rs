@@ -19,11 +19,15 @@ use schnorrkel::{PublicKey, PUBLIC_KEY_LENGTH, Keypair, vrf};
 use crate::Error;
 
 use super::{
-    ApprovalContext, AssignmentResult, Hash, ParaId,
+    ApprovalContext, AssignmentResult, Hash, ParaId, DelayTranche,
     stories, // RelayVRFStory, RelayEquivocationStory
     ValidatorId,
 };
 
+
+pub(super) fn validator_id_from_key(key: &PublicKey) -> ValidatorId {
+    unimplemented!() // checker.public.to_bytes() except we need substrate's stuff here
+}
 
 
 impl ApprovalContext {
@@ -200,7 +204,7 @@ impl<C> Assignment<C,()> where C: Criteria {
         let t = self.criteria.extra(&context);
         let vrf_proof = checker.dleq_proove(t, &self.vrf_inout, vrf::KUSAMA_VRF).0.to_bytes();
         let vrf_preout = self.vrf_inout.to_output().to_bytes();
-        let checker = unimplemented!(); // checker.public.to_bytes() except we need substrate's stuff here
+        let checker = validator_id_from_key(&checker.public);
         let criteria = self.criteria.clone();
         let vrf_signature = AssignmentSignature { checker, vrf_proof, };
         AssignmentSigned { context, criteria, vrf_preout, vrf_signature, }
@@ -262,7 +266,7 @@ pub(super) trait Position {
     fn paraid(&self, context: &ApprovalContext) -> AssignmentResult<ParaId>;
 
     /// Always assign `RelayVRFModulo` the zeroth delay tranche
-    fn delay_tranche(&self) -> super::DelayTranche { 0 }
+    fn delay_tranche(&self) -> DelayTranche { 0 }
 }
 
 impl<K> Position for Assignment<RelayVRFModulo,K> {
@@ -278,8 +282,9 @@ impl<K> Position for Assignment<RelayVRFModulo,K> {
     }
 
     /// Always assign `RelayVRFModulo` the zeroth delay tranche
-    fn delay_tranche(&self) -> super::DelayTranche { 0 }
+    fn delay_tranche(&self) -> DelayTranche { 0 }
 }
+
 
 /// Approval checker assignment criteria that fully utilizes delays.
 ///
@@ -288,12 +293,24 @@ impl<K> Position for Assignment<RelayVRFModulo,K> {
 pub trait DelayCriteria : Criteria {
     /// All delay based assignment criteria contain an explicit paraid
     fn paraid(&self) -> ParaId;
+    /// We consolodate this many plus one delays at tranche zero, ensuring they always run.
+    fn zeroth_delay_tranche_width() -> DelayTranche;
+    /// 
+    fn max_delay_tranche() -> DelayTranche { 128 }
 }
 impl DelayCriteria for RelayVRFDelay {
     fn paraid(&self) -> ParaId { self.paraid }
+    /// We do not require any delay zero tranches thanks to `RelayVRFModulo`,
+    /// but our simple impl for `Position::delay_tranche` still imposes one. 
+    fn zeroth_delay_tranche_width() -> DelayTranche { 0 }
 }
 impl DelayCriteria for RelayEquivocation {
     fn paraid(&self) -> ParaId { self.paraid }
+    /// We do need some consolodation at zero for `RelayEquivocation`.
+    /// We considered some modulo condition using relay chain block hashes,
+    /// except we're already slashing someone for equivocation, so being
+    /// less efficent hurts less than the extra code complexity.
+    fn zeroth_delay_tranche_width() -> DelayTranche { 8 }
 }
 
 impl<C,K> Position for Assignment<C,K> where C: DelayCriteria {
@@ -309,15 +326,13 @@ impl<C,K> Position for Assignment<C,K> where C: DelayCriteria {
     }
 
     /// Assign our delay using our VRF output
-    fn delay_tranche(&self) -> super::DelayTranche {
-        let max_tranches: u32 = unimplemented!();
+    fn delay_tranche(&self) -> DelayTranche {
+        let delay_tranche_modulus = C::max_delay_tranche() + C::zeroth_delay_tranche_width();
         // We use u64 here to give a reasonable distribution modulo the number of tranches
-        let mut tranche = u64::from_le_bytes(self.vrf_inout.make_bytes::<[u8; 8]>(b"tranche"));
-        tranche %= max_tranches as u64;
-        tranche as u32
+        let mut delay_tranche = u64::from_le_bytes(self.vrf_inout.make_bytes::<[u8; 8]>(b"tranche"));
+        delay_tranche %= delay_tranche_modulus as u64;
+        delay_tranche.saturating_sub(C::zeroth_delay_tranche_width() as u64) as u32
     }
 }
-
-
 
 
