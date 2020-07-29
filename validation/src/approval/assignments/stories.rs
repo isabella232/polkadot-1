@@ -71,6 +71,11 @@ impl ApprovalContext {
         unimplemented!()
     }
 
+    /// Fetch full epoch data from self.epoch
+    pub fn fetch_header(&self) -> Header {
+        unimplemented!()
+    }
+
     /// Assignments of `ParaId` to ailability cores for the current
     /// `epoch` and `slot`.
     /// 
@@ -86,9 +91,17 @@ impl ApprovalContext {
     /// possess block production capability for most parachains.
     /// We still favor scheduling parathreads onto availability cores
     /// earlier rather than later however.
-    // TODO:  Rename to `newly_available_paraids_by_core`?
     pub(super) fn paraids_by_core(&self) -> Arc<[Option<ParaId>]> {
         unimplemented!()
+    }
+
+    /// Assignments of `ParaId` to ailability cores for the current
+    /// `epoch` and `slot`.
+    ///
+    /// TODO: Return `CoreId`.  Improve performance!!!
+    pub(super) fn core_by_paraid(&self, paraid: ParaId) -> Option<()> {
+        if ! self.paraids_by_core().contains(&Some(paraid)) { return None; }
+        Some(())
     }
 
     /// Availability core supply
@@ -101,10 +114,9 @@ impl ApprovalContext {
         .expect("We cannot support terabyte block sizes, qed")
     }
 
-    /// Fetch full epoch data from self.epoch
-    pub fn fetch_header(&self) -> Header {
-        unimplemented!()
-    }
+    /// We sample in `RingVRFModulo` this many VRF inputs from the 
+    /// relay chain VRF to populate our zeroth delay tranche.
+    pub fn num_samples(&self) -> u16 { 3 }
 
     /// Create story for assignment criteria determined by relay chain VRFs.
     ///

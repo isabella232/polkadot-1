@@ -49,21 +49,52 @@ pub(super) struct AssignmentsByDelay<C: Criteria, K = criteria::AssignmentSignat
 impl<C: Criteria> Default for AssignmentsByDelay<C> {
     fn default() -> Self { AssignmentsByDelay(Default::default()) }
 }
+impl<C: Criteria> Default for AssignmentsByDelay<C,()> {
+    fn default() -> Self { AssignmentsByDelay(Default::default()) }
+}
 
-impl<C> AssignmentsByDelay<C> 
-where C: Criteria, Assignment<C>: Position,
-{    
+impl<C,K> AssignmentsByDelay<C,K> 
+where C: Criteria, Assignment<C,K>: Position,
+{
     fn bucket_mut(&mut self, delay_tranche: DelayTranche)
-     -> Option<&mut Vec< Assignment<C> >> 
+     -> Option<&mut Vec< Assignment<C,K> >> 
     {
         self.0.get_mut(&delay_tranche)
     }
-    
+
     /// Add new `Assignment` avoiding inserting any duplicates.
     ///
     /// Assumes there is only one valid delay value determined by
     /// some VRF output.
-    fn insert(&mut self, a: Assignment<C>, context: &ApprovalContext) -> AssignmentResult<DelayTranche> {
+    pub(super) fn insert_assignment_unchecked(&mut self, a: Assignment<C,K>, context: &ApprovalContext) -> DelayTranche {
+        let delay_tranche = a.delay_tranche(context);
+        let mut v = self.0.entry(delay_tranche).or_insert(Vec::new());
+        v.push(a);
+        delay_tranche
+    }
+
+    /// Iterate immutably over checkers.
+    fn range<R>(&self, r: R) -> impl Iterator<Item=&Assignment<C,K>>
+    where R: ::std::ops::RangeBounds<DelayTranche>,
+    {
+        self.0.range(r).map( |(_,v)| v.iter() ).flatten()
+    }
+
+    pub(super) fn pull_tranche(&mut self, delay_tranche: DelayTranche)
+     -> Option<Vec< Assignment<C,K> >> 
+    {
+        self.0.remove(&delay_tranche)
+    }
+}
+
+impl<C> AssignmentsByDelay<C> 
+where C: Criteria, Assignment<C>: Position,
+{    
+    /// Add new `Assignment` avoiding inserting any duplicates.
+    ///
+    /// Assumes there is only one valid delay value determined by
+    /// some VRF output.
+    pub(super) fn insert_assignment_checked(&mut self, a: Assignment<C>, context: &ApprovalContext) -> AssignmentResult<DelayTranche> {
         let delay_tranche = a.delay_tranche(context);
         let mut v = self.0.entry(delay_tranche).or_insert(Vec::new());
         // We could improve performance here with `HashMap<ValidatorId,..>`
@@ -74,13 +105,6 @@ where C: Criteria, Assignment<C>: Position,
         // debug_assert!( !v.iter().any( |a0| a0.checker() == a.checker() ) );
         v.push(a);
         Ok(delay_tranche)
-    }
-
-    /// Iterate immutably over checkers.
-    fn range<R>(&self, r: R) -> impl Iterator<Item=&Assignment<C>>
-    where R: ::std::ops::RangeBounds<DelayTranche>,
-    {
-        self.0.range(r).map( |(_,v)| v.iter() ).flatten()
     }
 }
 
@@ -163,7 +187,9 @@ impl CandidateTracker {
                 }
                 e.approved = true;
             },
-            Entry::Vacant(mut e) => { e.insert(CheckerStatus { approved: true, mine: false, }); },
+            Entry::Vacant(mut e) => {
+                e.insert(CheckerStatus { approved: true, mine: false, }); 
+            },
         }
         Ok(())
     }
@@ -219,8 +245,8 @@ impl CandidateTracker {
 /// provide critical methods unavailable on `Tracker` alone.
 pub struct Tracker {
     context: ApprovalContext,
-    current_slot: u64,
-    relay_vrf_story: stories::RelayVRFStory,
+    pub(super) current_slot: u64,
+    pub(super) relay_vrf_story: stories::RelayVRFStory,
     relay_equivocation_story: stories::RelayEquivocationStory,
     candidates: BTreeMap<ParaId,CandidateTracker>
 }
@@ -237,7 +263,17 @@ impl Tracker {
         Ok(Tracker { context, current_slot, relay_vrf_story, relay_equivocation_story, candidates, })
     }
 
-    fn access_story<C>(&self) -> &C::Story
+    pub fn context(&self) -> &ApprovalContext { &self.context }
+
+    pub fn delay_tranche(&self, slow: u64) -> Result<DelayTranche,::core::num::TryFromIntError> {
+        u32::try_from( self.current_slot - self.context.anv_slot_number() )
+    }
+
+    pub fn current_delay_tranche(&self) -> DelayTranche {
+        self.delay_tranche( self.current_slot ).expect("Always increased from this value, qed")
+    }
+
+    pub(super) fn access_story<C>(&self) -> &C::Story
     where C: Criteria, Assignment<C>: Position,
     {
         use core::any::Any;
@@ -247,17 +283,21 @@ impl Tracker {
     }
 
     /// Insert assignment verified elsewhere
-    pub(super) fn insert<C>(&mut self, a: Assignment<C>, mine: bool) -> AssignmentResult<()> 
+    pub(super) fn insert_assignment<C>(&mut self, a: Assignment<C>, mine: bool) -> AssignmentResult<()> 
     where C: Criteria, Assignment<C>: Position,
     {
         let checker = a.checker().clone();
         let paraid = a.paraid(&self.context)
             .ok_or(Error::BadAssignment("Insert attempted on missing ParaId.")) ?;
         let candidate = self.candidates.entry(paraid).or_insert(CandidateTracker::default());
-        if let Some(cs) = candidate.checkers.get(&checker) { if cs.mine != mine {
-            return Err(Error::BadAssignment("Attempted to verify my own assignment!"));
-        } }
-        candidate.access_criteria_mut::<C>().insert(a,&self.context) ?;
+        // We must handle some duplicate assignments because checkers
+        // could be assigned under both RelayVRF* and RelayEquivocation
+        if let Some(cs) = candidate.checkers.get_mut(&checker) { 
+            if cs.mine != mine {
+                return Err(Error::BadAssignment("Attempted to verify my own assignment!"));
+            }
+        }
+        candidate.access_criteria_mut::<C>().insert_assignment_checked(a,&self.context) ?;
         candidate.checkers.entry(checker).or_insert(CheckerStatus { approved: false, mine, });
         Ok(())        
     }
@@ -271,7 +311,7 @@ impl Tracker {
         if *context != self.context { 
             return Err(Error::BadAssignment("Incorrect ApprovalContext"));
         }
-        self.insert(a,false)
+        self.insert_assignment(a,false)
     }
 
     /// Read individual candidate's tracker
@@ -279,14 +319,14 @@ impl Tracker {
     /// Useful for `targets` and maybe `is_approved_before` methods of `CandidateTracker`.
     pub fn candidate(&self, paraid: &ParaId) -> AssignmentResult<&CandidateTracker>
     {
-        self.candidates.get(paraid).ok_or(Error::BadAssignment("Invalid ParaId"))
+        self.candidates.get(paraid).ok_or(Error::BadAssignment("Absent ParaId"))
     }
 
     /// Access individual candidate's tracker mutably
     ///
     /// Useful for `approve` method of `CandidateTracker`.
     pub fn candidate_mut(&mut self, paraid: &ParaId) -> AssignmentResult<&mut CandidateTracker> {
-        self.candidates.get_mut(paraid).ok_or(Error::BadAssignment("Invalid ParaId"))
+        self.candidates.get_mut(paraid).ok_or(Error::BadAssignment("Absent ParaId"))
     }
 
     pub fn current_anv_slot(&self) -> u64 { self.current_slot }

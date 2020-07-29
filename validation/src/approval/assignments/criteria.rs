@@ -168,7 +168,7 @@ impl<C> Assignment<C> where C: Criteria {
     /// Return our `AssignmentSigned`
     pub fn to_signed(&self, context: ApprovalContext) -> AssignmentSigned<C> {
         AssignmentSigned {
-            context: context.clone(),
+            context,
             criteria: self.criteria.clone(),
             vrf_preout: self.vrf_inout.to_output().to_bytes(),
             vrf_signature: self.vrf_signature.clone(),
@@ -190,15 +190,15 @@ impl<C> Assignment<C,()> where C: Criteria {
     /// the `checker` argument here, and making `K=Arc<Keypair>` work,
     /// except `Assignment`s always occur with so much repetition that
     /// passing the `Keypair` again makes more sense.
-    pub fn sign(self, context: ApprovalContext, checker: &Keypair) -> Assignment<C> {
+    pub fn sign(&self, context: &ApprovalContext, checker: &Keypair) -> Assignment<C> {
         let Assignment { criteria, vrf_signature: (), vrf_inout } = self;
         // Must exactly mirror `schnorrkel::Keypair::vrf_sign_extra`
         // or else rerun one point multiplicaiton in vrf_create_hash
-        let t = criteria.extra(&context);
-        let vrf_proof = checker.dleq_proove(t, &vrf_inout, vrf::KUSAMA_VRF).0.to_bytes();
+        let t = criteria.extra(context);
+        let vrf_proof = checker.dleq_proove(t, vrf_inout, vrf::KUSAMA_VRF).0.to_bytes();
         let checker = validator_id_from_key(&checker.public);
         let vrf_signature = AssignmentSignature { checker, vrf_proof, };
-        Assignment { criteria, vrf_signature, vrf_inout, }
+        Assignment { criteria: criteria.clone(), vrf_signature, vrf_inout: vrf_inout.clone(), }
     }
 }
 
@@ -329,7 +329,7 @@ impl<C,K> Position for Assignment<C,K> where C: DelayCriteria {
         use core::ops::Deref;
         let paraid = self.criteria.paraid();
         // TODO:  Speed up!  Cores are not sorted so no binary_search here
-        if ! context.paraids_by_core().deref().contains(&Some(paraid)) { return None; }
+        if context.core_by_paraid(paraid).is_none() { return None; }
         Some(paraid)
     }
 
