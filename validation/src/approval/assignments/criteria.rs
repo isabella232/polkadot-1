@@ -293,9 +293,6 @@ pub trait DelayCriteria : Criteria {
     /// We consolodate this many plus one delays at tranche zero, 
     /// ensuring they always run their checks.
     fn zeroth_delay_tranche_width() -> DelayTranche;
-    /// We set two delay tranches per core so that each tranche expects
-    /// half as many checkers as the number of backing checkers.
-    fn delay_tranches_per_core() -> DelayTranche { 2 }
 }
 impl DelayCriteria for RelayVRFDelay {
     fn paraid(&self) -> ParaId { self.paraid }
@@ -335,8 +332,7 @@ impl<C,K> Position for Assignment<C,K> where C: DelayCriteria {
 
     /// Assign our delay using our VRF output
     fn delay_tranche(&self, context: &ApprovalContext) -> DelayTranche {
-        let delay_tranche_modulus = context.num_cores() 
-            .saturating_mul( C::delay_tranches_per_core() )
+        let delay_tranche_modulus = context.num_delay_tranches() 
             .saturating_add( C::zeroth_delay_tranche_width() );
         // We use u64 here to give a reasonable distribution modulo the number of tranches
         let mut delay_tranche = u64::from_le_bytes(self.vrf_inout.make_bytes::<[u8; 8]>(b"tranche"));

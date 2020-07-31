@@ -203,16 +203,19 @@ impl CandidateTracker {
         self.approve(checker, false)
     }
 
-    fn count_approved_helper(&self,iter: impl Iterator<Item=ValidatorId>) -> usize 
+    fn count_approved_helper(&self,iter: impl Iterator<Item=ValidatorId>) -> (u32, u32) 
     {
         let mut cm = HashSet::new();
+        let mut total: u32 = 0;
         for checker in iter {
+            total += 1;  // Panics if more than u32::MAX = 4 billion validators.
             if Some(true) == self.is_approved_by_checker(&checker) {  cm.insert(checker);  }
         }
-        cm.len()
+        let approved = cm.len() as u32;
+        (approved, total-approved)
     }
 
-    fn approval_by_relay_vrf<R>(&self, r: R) -> usize
+    fn approval_by_relay_vrf<R>(&self, r: R) -> (u32, u32) 
     where R: ::std::ops::RangeBounds<DelayTranche> + Clone
     {
         let x = self.relay_vrf_modulo.range(r.clone())  // Always delay_tranche=0
@@ -222,21 +225,22 @@ impl CandidateTracker {
         self.count_approved_helper( x.chain(y) )
     }
 
-    fn approval_by_relay_equivocation<R>(&self, r: R) -> usize
+    fn approval_by_relay_equivocation<R>(&self, r: R) -> (u32, u32) 
     where R: ::std::ops::RangeBounds<DelayTranche>
     {
         self.count_approved_helper( self.relay_equivocation.range(r).map( |a| a.checker().clone() ) )
     }
 
-    pub fn is_approved_before(&self, delay: DelayTranche) -> bool {
-        self.approval_by_relay_vrf(0..delay)
-         < self.targets.relay_vrf_checkers as usize
-        &&
-        self.approval_by_relay_equivocation(0..delay)
-         < self.targets.relay_equivocation_checkers as usize
+    pub fn is_approved_before(&self, noshow: DelayTranche, now: DelayTranche) -> bool {
+        let (approved1,noshows) = self.approval_by_relay_vrf(0..noshow);
+        let (approved2,_waiting) = self.approval_by_relay_vrf(noshow..now);
+        let b: bool = approved1 + approved2 >= noshows + (self.targets.relay_vrf_checkers as u32);
+
+        let (approved1,noshows) = self.approval_by_relay_equivocation(0..noshow);
+        let (approved2,_waiting) = self.approval_by_relay_equivocation(noshow..now);
+        b && approved1 + approved2 >= noshows + (self.targets.relay_equivocation_checkers as u32)
     }
 }
-
 
 
 /// Tracks approval checkers assignments
@@ -264,14 +268,6 @@ impl Tracker {
     }
 
     pub fn context(&self) -> &ApprovalContext { &self.context }
-
-    pub fn delay_tranche(&self, slow: u64) -> Result<DelayTranche,::core::num::TryFromIntError> {
-        u32::try_from( self.current_slot - self.context.anv_slot_number() )
-    }
-
-    pub fn current_delay_tranche(&self) -> DelayTranche {
-        self.delay_tranche( self.current_slot ).expect("Always increased from this value, qed")
-    }
 
     pub(super) fn access_story<C>(&self) -> &C::Story
     where C: Criteria, Assignment<C>: Position,
@@ -331,17 +327,26 @@ impl Tracker {
 
     pub fn current_anv_slot(&self) -> u64 { self.current_slot }
 
-    pub fn delay(&self) -> DelayTranche {
-        let delay_bound: u32 = unimplemented!(); // TODO: num_validators? smaller?
-        let slot = self.current_slot.checked_sub( self.context.anv_slot_number() )
-            .expect("current_slot initialized to context.slot, qed");
-        u32::try_from( max(slot, delay_bound as u64) ).expect("just checked this, qed")
+    pub fn delay_tranche(&self, slot: u64) -> Option<DelayTranche> {
+        let slot = slot.checked_sub( self.context.anv_slot_number() ) ?;
+        u32::try_from( max(slot, self.context.num_delay_tranches() as u64 - 1) ).ok()
+    }
+
+    pub fn current_delay_tranche(&self) -> DelayTranche {
+        self.delay_tranche( self.current_slot )
+        .expect("We initialise current_slot to context.anv_slot_number and then always increased it afterwards, qed")
+    }
+
+    pub fn current_noshow_delay_tranche(&self) -> DelayTranche {
+        self.current_delay_tranche()
+            .saturating_sub( stories::NOSHOW_DELAY_TRANCHES )
     }
 
     /// Ask if all candidates are approved
     pub fn is_approved(&self) -> bool {
-        let slot = self.delay();
-        self.candidates.iter().all(|(_paraid,c)| c.is_approved_before(slot))
+        let noshow = self.current_noshow_delay_tranche();
+        let now = self.current_delay_tranche();
+        self.candidates.iter().all(|(_paraid,c)| c.is_approved_before(noshow,now))
     }
 
     /// Initalize tracking others assignments and approvals

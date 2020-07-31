@@ -17,7 +17,7 @@ use sc_consensus_babe::{Epoch};
 // use sp_consensus_babe::{EquivocationProof};
 // https://github.com/paritytech/substrate/pull/6362/files#diff-aee164b6a1b80d52767f208971d01d82R32
 
-use super::{AssignmentResult, ParaId, Hash, Header, Error, ValidatorId};
+use super::{AssignmentResult, DelayTranche, ParaId, Hash, Header, Error, ValidatorId};
 
 
 /// A slot number.
@@ -28,6 +28,9 @@ pub type EpochNumber = u64;
 
 
 pub const ANV_SLOTS_PER_BP_SLOTS: u64 = 12; // = 6*2, so every half second
+
+pub const NOSHOW_DELAY_TRANCHES: super::DelayTranche = 24;  // Twice ANV_SLOTS_PER_BP_SLOTS ??
+
 
 /// Identifies the relay chain block in which we declared these
 /// parachain candidates to be availability 
@@ -106,12 +109,22 @@ impl ApprovalContext {
 
     /// Availability core supply
     ///
-    /// Always cequals `self.paraids_by_core().len()`
-    /// and remains constant within an epoch.
-    pub fn num_cores(&self) -> u32 {
-        use core::convert::TryFrom;
-        u32::try_from( self.paraids_by_core().len() )
-        .expect("We cannot support terabyte block sizes, qed")
+    /// An upper bound on `self.paraids_by_core().len()` that remains
+    /// constant within an epoch.  Any changes should obey code change
+    /// rules and thus be delayed one epoch.
+    pub fn max_cores(&self) -> u32 { 128 }
+
+    /// We set two delay tranches per core so that each tranche expects
+    /// half as many checkers as the number of backing checkers.
+    pub fn delay_tranches_per_core(&self) -> DelayTranche { 2 }
+
+    /// Maximum number of delay tranches
+    ///
+    /// We do not set this differently for RelayEquivocationStory and
+    /// RelayVRF because doing so complicates the code needlessly, and
+    /// this bound should never be reached by either.
+    pub fn num_delay_tranches(&self) -> DelayTranche {
+        self.max_cores().saturating_mul( self.delay_tranches_per_core() )
     }
 
     /// We sample in `RingVRFModulo` this many VRF inputs from the 
