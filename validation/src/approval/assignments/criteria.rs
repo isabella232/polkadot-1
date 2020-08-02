@@ -84,8 +84,8 @@ impl Criteria for RelayVRFModulo {
     fn vrf_input(&self, story: &Self::Story) -> AssignmentResult<Transcript> {
         if self.sample > 0 { return Err(Error::BadAssignment("RelayVRFModulo does not yet support additional samples")); }
         let mut t = Transcript::new(b"Approval Assignment VRF");
-        t.append_message(b"RelayVRFModulo", &story.anv_rc_vrf_source );
-        t.append_u64(b"RelayVRFModulo", self.sample.into() );
+        t.append_message(b"RelayVRF", &story.anv_rc_vrf_source );
+        t.append_u64(b"Sample", self.sample.into() );
         Ok(t)
     }
 }
@@ -273,9 +273,9 @@ impl<K> Position for Assignment<RelayVRFModulo,K> {
         // TODO: Optimize accessing this from `ApprovalContext`
         let paraids = context.paraids_by_core();
         // We use u64 here to give a reasonable distribution modulo the number of parachains
-        let mut parachain = u64::from_le_bytes(self.vrf_inout.make_bytes::<[u8; 8]>(b"parachain"));
-        parachain %= paraids.len() as u64;  // assumes usize < u64
-        paraids[parachain as usize]
+        let mut core = u64::from_le_bytes(self.vrf_inout.make_bytes::<[u8; 8]>(b"core"));
+        core %= paraids.len() as u64;  // assumes usize < u64
+        paraids[core as usize]
     }
 
     /// Always assign `RelayVRFModulo` the zeroth delay tranche
