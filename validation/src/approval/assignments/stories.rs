@@ -178,7 +178,7 @@ impl ApprovalContext {
 
 /// Approval assignment story comprising a relay chain VRF output
 pub struct RelayVRFStory {
-    /// Actual final VRF output computed for the 
+    /// Actual final VRF output computed from the relay chain VRF
     pub(super) anv_rc_vrf_source: [u8; 32],
 }
 
@@ -186,12 +186,11 @@ pub struct RelayVRFStory {
 pub struct RelayEquivocationStory {
     /// Relay chain block hash
     pub(super) header: Header,
-    /// Relay chain equivocations
+    /// Relay chain equivocations from which we compute candidate equicocations
     pub(super) relay_equivocations: Vec<Header>, 
-    /// Actual final VRF output computed for the 
+    /// Actual candidate equicocations and rtheir block hashes
     pub(super) candidate_equivocations: HashMap<ParaId,Hash>,
 }
-
 
 impl RelayEquivocationStory {
     /*
