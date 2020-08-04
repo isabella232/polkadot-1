@@ -165,13 +165,17 @@ impl<C> Assignment<C> where C: Criteria {
     /// Identify the checker
     pub fn checker(&self) -> &ValidatorId { &self.vrf_signature.checker }
 
+    pub(super) fn checker_n_recieved(&self) -> (ValidatorId,DelayTranche)
+        { (self.vrf_signature.checker.clone(), self.vrf_signature.recieved) }
+
     /// Return our `AssignmentSigned`
     pub fn to_signed(&self, context: ApprovalContext) -> AssignmentSigned<C> {
         AssignmentSigned {
             context,
             criteria: self.criteria.clone(),
+            checker: self.vrf_signature.checker.clone(),
             vrf_preout: self.vrf_inout.to_output().to_bytes(),
-            vrf_signature: self.vrf_signature.clone(),
+            vrf_proof: self.vrf_signature.vrf_proof.clone()
         }
     }
 }
@@ -190,14 +194,19 @@ impl<C> Assignment<C,()> where C: Criteria {
     /// the `checker` argument here, and making `K=Arc<Keypair>` work,
     /// except `Assignment`s always occur with so much repetition that
     /// passing the `Keypair` again makes more sense.
-    pub fn sign(&self, context: &ApprovalContext, checker: &Keypair) -> Assignment<C> {
+    pub fn sign(
+        &self,
+        context: &ApprovalContext,
+        checker: &Keypair,
+        recieved: DelayTranche,
+    ) -> Assignment<C> {
         let Assignment { criteria, vrf_signature: (), vrf_inout } = self;
         // Must exactly mirror `schnorrkel::Keypair::vrf_sign_extra`
         // or else rerun one point multiplicaiton in vrf_create_hash
         let t = criteria.extra(context);
         let vrf_proof = checker.dleq_proove(t, vrf_inout, vrf::KUSAMA_VRF).0.to_bytes();
         let checker = validator_id_from_key(&checker.public);
-        let vrf_signature = AssignmentSignature { checker, vrf_proof, };
+        let vrf_signature = AssignmentSignature { checker, vrf_proof, recieved };
         Assignment { criteria: criteria.clone(), vrf_signature, vrf_inout: vrf_inout.clone(), }
     }
 }
@@ -206,8 +215,19 @@ impl<C> Assignment<C,()> where C: Criteria {
 /// Assignment's VRF signature.  
 #[derive(Clone)]
 pub struct AssignmentSignature {
+    /// Signer's public key
     checker: ValidatorId,
+    /// DLEQ Proof of the VRF mapping the story to pre-output,
+    /// and singing the context as well.
     vrf_proof: [u8; vrf::VRF_PROOF_LENGTH],
+    /// Actualy delay tranche when we recieved this announcement.
+    ///
+    /// We never transfer this inside the `SignedAssignment`, but
+    /// compute it outrelves when deserializing assignment notices.  
+    /// It prevents us counting checkers as no shows too early,
+    /// which permits delayed annoucements and improves workload
+    /// balancing.  
+    recieved: DelayTranche,
 }
 
 
@@ -215,36 +235,48 @@ pub struct AssignmentSignature {
 pub struct AssignmentSigned<C: Criteria> {
     context: ApprovalContext,
     criteria: C,
+    /// Signer's public key
+    checker: ValidatorId,
+    /// VRF Pre-Output computed from the story associated to this
+    /// context and criteria, and proven correct by vrf_proof, but
+    /// only yields output with `make_bytes` calls on its `VRFInOut`.
     vrf_preout: [u8; vrf::VRF_OUTPUT_LENGTH],
-    vrf_signature: AssignmentSignature,
+    /// DLEQ Proof of the VRF mapping the story to pre-output,
+    /// and singing the context as well.
+    vrf_proof: [u8; vrf::VRF_PROOF_LENGTH],
 }
 
 impl<C: Criteria> AssignmentSigned<C> {
-    pub fn checker(&self) -> &ValidatorId { &self.vrf_signature.checker }
+    pub fn checker(&self) -> &ValidatorId { &self.checker }
 
     /// Get publickey identifying checker
     fn checker_pk(&self) -> AssignmentResult<PublicKey> {
         use primitives::crypto::Public;
-        PublicKey::from_bytes(&self.vrf_signature.checker.to_raw_vec()) // Vec WTF?!?
+        PublicKey::from_bytes(&self.checker.to_raw_vec()) // Vec WTF?!?
         .map_err(|_| Error::BadAssignment("Bad VRF signature (bad publickey)"))
     }
 
     /// Verify a signed assignment
-    pub fn verify(&self, story: &C::Story)
+    pub fn verify(&self, story: &C::Story, recieved: DelayTranche)
      -> AssignmentResult<(&ApprovalContext,Assignment<C,AssignmentSignature>)> 
     {
-        let AssignmentSigned { context, criteria, vrf_preout, vrf_signature  } = self;
+        let AssignmentSigned { context, criteria, vrf_preout, checker, vrf_proof, } = self;
+        let vrf_signature = AssignmentSignature {
+            checker: checker.clone(),
+            vrf_proof: vrf_proof.clone(),
+            recieved, 
+        };
         let checker_pk = self.checker_pk() ?;
         let vrf_inout = vrf::VRFOutput::from_bytes(vrf_preout)
             .expect("length enforced statically")
             .attach_input_hash(&checker_pk, criteria.vrf_input(story) ?)
             .map_err(|_| Error::BadAssignment("Bad VRF signature (bad pre-output)")) ?;
-        let vrf_proof = vrf::VRFProof::from_bytes(&vrf_signature.vrf_proof)
+        let vrf_proof = vrf::VRFProof::from_bytes(vrf_proof)
             .map_err(|_| Error::BadAssignment("Bad VRF signature (bad proof)")) ?;
         let t = criteria.extra(&context);
         let _ = checker_pk.dleq_verify(t, &vrf_inout, &vrf_proof, vrf::KUSAMA_VRF)
             .map_err(|_| Error::BadAssignment("Bad VRF signature (invalid)")) ?;
-        Ok((context, Assignment { criteria: criteria.clone(), vrf_signature: vrf_signature.clone(), vrf_inout, }))
+        Ok((context, Assignment { criteria: criteria.clone(), vrf_signature, vrf_inout, }))
     }
 }
 

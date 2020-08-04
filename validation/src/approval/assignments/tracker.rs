@@ -4,40 +4,18 @@
 //! invokations in this module, which 
 //!
 
-use core::{ cmp::max, convert::TryFrom, ops, };
-use std::collections::{BTreeMap, HashSet, HashMap, hash_map::Entry};
+use core::{ cmp::{max,min}, convert::TryFrom, ops, };
+use std::collections::{BTreeMap, HashMap, hash_map::Entry};
 
 use crate::Error;
 
 use super::{
-    ApprovalContext, AssignmentResult, Hash, ParaId,
-    DelayTranche, stories,
+    ApprovalContext, ApprovalTargets, ApprovalStatus, AssignmentResult,
+    Hash, ParaId, DelayTranche,
+    stories,
     criteria::{self, Assignment, AssignmentSigned, Criteria, Position},
     ValidatorId,
 };
-
-
-/// Approvals target levels
-///
-/// We instantiuate this with `Default` currently, but we'll want the
-/// relay VRF target number to be configurable by the chain eventually.
-pub struct ApprovalsTargets {
-    /// Approvals required for criteria based upon relay chain VRF output,
-    /// never too larger, never too small.
-    pub relay_vrf_checkers: u16,
-    /// Approvals required for criteria based upon relay chain equivocations,
-    /// initially zero but increased if we discover equivocations.
-    pub relay_equivocation_checkers: u16,
-}
-
-impl Default for ApprovalsTargets {
-    fn default() -> Self {
-        ApprovalsTargets {
-            relay_vrf_checkers: 20,  // We've no analysis backing this choice yet.
-            relay_equivocation_checkers: 0,
-        }
-    }
-}
 
 
 /// Verified assignments sorted by their delay tranche
@@ -133,7 +111,7 @@ struct CheckerStatus {
 ///
 /// TODO: Add some bitfield that detects multiple insertions by the same validtor.
 pub struct CandidateTracker {
-    targets: ApprovalsTargets,
+    targets: ApprovalTargets,
     /// Approval statments
     checkers: HashMap<ValidatorId,CheckerStatus>,
     /// Assignments of modulo type based on the relay chain VRF
@@ -163,10 +141,10 @@ impl CandidateTracker {
     }
 
     /// Read current approvals checkers target levels
-    pub fn targets(&self) -> &ApprovalsTargets { &self.targets }
+    pub fn targets(&self) -> &ApprovalTargets { &self.targets }
 
     // /// Write current approvals checkers target levels
-    // pub fn targets_mut(&self) -> &mut ApprovalsTargets { &mut self.targets }
+    // pub fn targets_mut(&self) -> &mut ApprovalTargets { &mut self.targets }
 
     /// Return whether the given validator approved this candiddate,
     /// or `None` if we've no assignment form them.
@@ -203,43 +181,114 @@ impl CandidateTracker {
         self.approve(checker, false)
     }
 
-    fn count_approved_helper(&self,iter: impl Iterator<Item=ValidatorId>) -> (u32, u32) 
+    /// Returns the approved and absent counts for all validtors
+    /// given by the iterator.  Ignores unassigned validators, which
+    /// makes results meaningless if you want them counted, but
+    /// this behavior makes sense assuming checkers contains every
+    /// validator discussed elsewhere, including ourselves.
+    fn counter_helper<I>(&self, iter: I, noshow: DelayTranche) -> Counter
+    where I: Iterator<Item=(ValidatorId,DelayTranche)>
     {
-        let mut cm = HashSet::new();
-        let mut total: u32 = 0;
-        for checker in iter {
-            total += 1;  // Panics if more than u32::MAX = 4 billion validators.
-            if Some(true) == self.is_approved_by_checker(&checker) {  cm.insert(checker);  }
+        let mut cm: HashMap<ValidatorId,DelayTranche> = HashMap::new(); // Deduplicate iter
+        let mut assigned: u32 = 0;
+        for (checker,recieved) in iter {
+            if let Some(b) = self.is_approved_by_checker(&checker) {
+                assigned += 1;  // Panics if more than u32::MAX = 4 billion validators.
+                if !b {
+                    cm.entry(checker)
+                        .and_modify(|r| { *r = min(*r,recieved) })
+                        .or_insert(recieved);
+                }
+            } // TODO:  Internal error log?
         }
-        let approved = cm.len() as u32;
-        (approved, total-approved)
+        let mut waiting = cm.len() as u32;
+        let noshows = cm.values().cloned().filter(|r: &u32| *r < noshow).count() as u32;
+        let approved = assigned - waiting;
+        waiting -= noshows;
+        debug_assert!( assigned == approved + waiting + noshows );
+        Counter { approved, waiting, noshows, assigned }
     }
 
-    fn approval_by_relay_vrf<R>(&self, r: R) -> (u32, u32) 
+    /// Returns the approved and absent counts of validtors assigned
+    /// by either `RelayVRFStory` or `RelayWquivocationStory`, and
+    /// within the given range.
+    fn range_counter<S: 'static,R>(&self, r: R, noshow: DelayTranche) -> Counter
     where R: ::std::ops::RangeBounds<DelayTranche> + Clone
     {
-        let x = self.relay_vrf_modulo.range(r.clone())  // Always delay_tranche=0
-            .map( |a| a.checker().clone() );
-        let y = self.relay_vrf_delay.range(r)  // Always delay_tranche=0
-            .map( |a| a.checker().clone() );
-        self.count_approved_helper( x.chain(y) )
+        use core::any::TypeId;
+        let s = TypeId::of::<S>();
+        if s == TypeId::of::<stories::RelayVRFStory>() {
+            let x = self.relay_vrf_modulo.range(r.clone())  // Always delay_tranche=0
+                .map( |a| a.checker_n_recieved() );
+            let y = self.relay_vrf_delay.range(r)
+                .map( |a| a.checker_n_recieved() );
+            self.counter_helper( x.chain(y), noshow )
+        } else if s == TypeId::of::<stories::RelayEquivocationStory>() {
+            let z = self.relay_equivocation.range(r).map( |a| a.checker_n_recieved() );
+            self.counter_helper(z, noshow)
+        } else { panic!("Oops, we've some foreign type for Criteria::Story!") }
     }
 
-    fn approval_by_relay_equivocation<R>(&self, r: R) -> (u32, u32) 
-    where R: ::std::ops::RangeBounds<DelayTranche>
-    {
-        self.count_approved_helper( self.relay_equivocation.range(r).map( |a| a.checker().clone() ) )
+    /// Recompute our current approval progress number
+    pub fn approval_status<S: 'static>(&self, now: DelayTranche) -> ApprovalStatus {
+        // We account for no shows in multiple tranches by increasing the no show timeout
+        let mut c = ApprovalStatus {
+            tranche:  0,
+            target:   self.targets.target::<S>(),
+            approved: 0, 
+            waiting:  0, 
+            noshows:  0, 
+            assigned: 0
+        };
+        // We track total noshows in c so we need a seperate no show counter here.
+        let mut noshows = 0;
+
+        let mut noshow_timeout = self.targets.noshow_timeout;
+        // We do not count tranches for which we should not yet have
+        // recieved any assignments, even though we do store early
+        // announcements.
+        while c.tranche + noshow_timeout < now + self.targets.noshow_timeout {
+            let d = self.range_counter::<S,_>(c.tranche..c.tranche+1, noshow_timeout);
+            c.assigned += d.assigned;
+            c.waiting  += d.waiting;
+            c.noshows  += d.noshows;
+            noshows    += d.noshows;
+            c.approved += d.approved;
+            c.tranche += 1;
+
+            // Consider later tranches if not enough asignees yet
+            if c.assigned < c.target { continue; }
+            // Ignore later tranches if we've enough assignees and no no shows
+            if noshows == 0 { break; }
+            // We replace no shows by increasing our target when
+            // reaching our initial or any subseuent target.
+            // We ask for two new checkers per no show here,
+            // acording to the analysis (TODO: Alistair)
+            c.target = c.assigned + c.noshows;
+            noshows = 0;
+            // We view tranches as later for being counted no show
+            // since they announced much latter.
+            noshow_timeout += self.targets.noshow_timeout; 
+        }
+        c.waiting += noshows;
+        c
     }
 
-    pub fn is_approved_before(&self, noshow: DelayTranche, now: DelayTranche) -> bool {
-        let (approved1,noshows) = self.approval_by_relay_vrf(0..noshow);
-        let (approved2,_waiting) = self.approval_by_relay_vrf(noshow..now);
-        let b: bool = approved1 + approved2 >= noshows + (self.targets.relay_vrf_checkers as u32);
-
-        let (approved1,noshows) = self.approval_by_relay_equivocation(0..noshow);
-        let (approved2,_waiting) = self.approval_by_relay_equivocation(noshow..now);
-        b && approved1 + approved2 >= noshows + (self.targets.relay_equivocation_checkers as u32)
+    pub fn is_approved_before(&self, now: DelayTranche) -> bool {
+        self.approval_status::<stories::RelayVRFStory>(now).is_approved()
+        && self.approval_status::<stories::RelayEquivocationStory>(now).is_approved()
     }
+}
+
+struct Counter {
+    /// Approval votes thus far
+    approved: u32,
+    /// Awaiting approval votes
+    waiting: u32,
+    /// We've waoted too long for these, so they require relacement
+    noshows: u32, 
+    /// Total validtors assigned, so approved wiaitng, or noshow
+    assigned: u32
 }
 
 
@@ -303,7 +352,7 @@ impl Tracker {
      -> AssignmentResult<()> 
     where C: Criteria, Assignment<C>: Position,
     {
-        let (context,a) = a.verify(self.access_story::<C>()) ?;
+        let (context,a) = a.verify(self.access_story::<C>(), self.current_delay_tranche()) ?;
         if *context != self.context { 
             return Err(Error::BadAssignment("Incorrect ApprovalContext"));
         }
@@ -337,16 +386,17 @@ impl Tracker {
         .expect("We initialise current_slot to context.anv_slot_number and then always increased it afterwards, qed")
     }
 
+    /*
     pub fn current_noshow_delay_tranche(&self) -> DelayTranche {
         self.current_delay_tranche()
             .saturating_sub( stories::NOSHOW_DELAY_TRANCHES )
     }
+    */
 
     /// Ask if all candidates are approved
     pub fn is_approved(&self) -> bool {
-        let noshow = self.current_noshow_delay_tranche();
         let now = self.current_delay_tranche();
-        self.candidates.iter().all(|(_paraid,c)| c.is_approved_before(noshow,now))
+        self.candidates.iter().all( |(_paraid,c)| c.is_approved_before(now) )
     }
 
     /// Initalize tracking others assignments and approvals

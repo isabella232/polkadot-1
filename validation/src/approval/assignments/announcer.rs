@@ -33,7 +33,8 @@ impl Tracker {
             if let Some(paraid) = a.paraid(&context) {
                 // Add eah paraid only once.
                 if announced_relay_vrf_modulo.0.contains_key(&paraid) { continue; }
-                let a = a.sign(&context, &myself);
+                let recieved = 0; // TODO: Allow for late announcement
+                let a = a.sign(&context, &myself, recieved);
                 let a_signed = a.to_signed(context);
                 tracker.insert_assignment(a,true) ?;
                 announced_relay_vrf_modulo.0.insert(paraid,a_signed);
@@ -159,9 +160,10 @@ impl Announcer {
         }
         for a in vs.iter().flatten() {
             let context = self.tracker.context().clone();
+            let recieved = self.tracker.current_delay_tranche();
             let paraid = a.paraid(&context)
                 .expect("Announcing assignment for `ParaId` not assigned to any core.");
-            let a = a.sign(&context, &self.myself);
+            let a = a.sign(&context, &self.myself, recieved);
             let a_signed = a.to_signed(context);
             self.tracker.insert_assignment(a,true)
             .expect("First, we insert only for paraids assigned to cores here because this assignment gets fixed by the relay chain block.  Second, we restrict each criteria to doing only one assignment per paraid, so we cannot find any duplicates.  Also, we've already removed the pending assignment above, making `candidate.checkers` empty.");
