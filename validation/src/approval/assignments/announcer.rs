@@ -147,7 +147,7 @@ impl Announcer {
         .expect("Oops, we've some foreign type as Criteria!")
     }
 
-    fn announce_pending<C,I>(&mut self, slots: I)
+    fn announce_pending_iter<C,I>(&mut self, slots: I)
     where C: DelayCriteria, Assignment<C>: Position,
           I: IntoIterator<Item=DelayTranche>,
     {
@@ -171,16 +171,24 @@ impl Announcer {
         }
     }
 
+    fn announce_pending<C>(&mut self, new_delay_tranche: DelayTranche)
+    where C: DelayCriteria, Assignment<C>: Position,
+    {
+        let r = self.current_delay_tranche()..new_delay_tranche;
+        self.announce_pending_iter::<C,_>(r)
+        // !! c.assigned < c.target !!
+    }
+
     /// Advances the AnV slot aka time to the specified value,
     /// enquing any pending announcements too.
     pub fn advance_anv_slot(&mut self, new_slot: u64) {
         if new_slot <= self.tracker.current_slot { return; }
         let new_delay_tranche = self.delay_tranche(new_slot)
             .expect("new_slot > current_slot > context.anv_slot_number");
-        let r = self.current_delay_tranche()..new_delay_tranche;
         // NOPE NOPE
-        self.announce_pending::<criteria::RelayVRFDelay,_>(r.clone());
-        self.announce_pending::<criteria::RelayEquivocation,_>(r);
+
+        self.announce_pending::<criteria::RelayVRFDelay>(new_delay_tranche);
+        self.announce_pending::<criteria::RelayEquivocation>(new_delay_tranche);
         self.tracker.current_slot = new_slot;
     }
 

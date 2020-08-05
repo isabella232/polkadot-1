@@ -78,7 +78,7 @@ where C: Criteria, Assignment<C>: Position,
         // We could improve performance here with `HashMap<ValidatorId,..>`
         // but these buckets should stay small-ish due to using VRFs.
         if v.iter().any( |a0| a0.checker() == a.checker() ) { 
-            return Err(Error::BadAssignment("Attempted insertion of duplicate ")); 
+            return Err(Error::BadAssignment("Attempted inserting duplicate assignment!")); 
         }
         // debug_assert!( !v.iter().any( |a0| a0.checker() == a.checker() ) );
         v.push(a);
@@ -106,10 +106,10 @@ struct CheckerStatus {
     // delay_tranche: Option<DelayTranche>,
 }
 
-#[derive(Default)]
 /// All assignments tracked for one specfic parachain cadidate.
 ///
 /// TODO: Add some bitfield that detects multiple insertions by the same validtor.
+#[derive(Default)]
 pub struct CandidateTracker {
     targets: ApprovalTargets,
     /// Approval statments
@@ -178,7 +178,9 @@ impl CandidateTracker {
     /// our current scheme makes counting approvals slightly slower.
     /// We can optimize performance later with slightly more complex code.
     ///
-    /// Rejects approving your own assignments.
+    /// TODO: We should rejects approving your own assignments, except
+    /// we've a bug that invoking this on yourself before the assignment
+    /// exists creates an assignemnt with `mine = true`.
     pub fn approve_others(&mut self, checker: ValidatorId) -> AssignmentResult<()> {
         self.approve(checker, false)
     }
@@ -232,7 +234,8 @@ impl CandidateTracker {
     }
 
     /// Recompute our current approval progress number
-    pub fn approval_status<S: 'static>(&self, now: DelayTranche) -> ApprovalStatus {
+    pub fn approval_status<S: 'static>(&self, now: DelayTranche) -> ApprovalStatus 
+    {
         // We account for no shows in multiple tranches by increasing the no show timeout
         let mut c = ApprovalStatus {
             tranche:  0,
@@ -242,7 +245,7 @@ impl CandidateTracker {
             noshows:  0, 
             assigned: 0
         };
-        // We track total noshows in c so we need a seperate no show counter here.
+        // We track total noshows in c so we need a seperate local no show counter here.
         let mut noshows = 0;
 
         let mut noshow_timeout = self.targets.noshow_timeout;
@@ -307,15 +310,35 @@ pub struct Tracker {
 }
 
 impl Tracker {
+    /// Create a tracker 
     pub fn new(context: ApprovalContext, target: u16) -> AssignmentResult<Tracker> {
         let current_slot = context.anv_slot_number();
         // TODO: Improve `stories::*::new()` methods
         let header = unimplemented!();
         let relay_vrf_story = context.new_vrf_story(header,unimplemented!()) ?;
         let relay_equivocation_story = unimplemented!(); // stories::RelayEquivocationStory::new(header);
-        let candidates = BTreeMap::default();
-        // TODO: Add parachain candidates 
+        let candidates = BTreeMap::new();
+        // TODO: Add parachain candidates here maybe ??
         Ok(Tracker { context, current_slot, relay_vrf_story, relay_equivocation_story, candidates, })
+    }
+
+    /// Initialize tracking a candidate.
+    ///
+    /// Invoke this for all desired candidates before invoking
+    /// the `into_watcher` or `into_announcer` builders.
+    ///
+    /// Returns `false` if this invokation reinitalized an
+    /// existing candidate, maybe harmless maybe not.
+    pub fn initalize_candidate(&mut self, paraid: ParaId) -> bool {
+        let candidate = CandidateTracker {
+            // TODO: We'll want more nuanced control over initial targets levels.
+            targets:   ApprovalTargets::default(),
+            checkers:  HashMap::new(),
+            relay_vrf_modulo:   AssignmentsByDelay::default(),
+            relay_vrf_delay:    AssignmentsByDelay::default(),
+            relay_equivocation: AssignmentsByDelay::default(),
+        };
+        self.candidates.insert(paraid,candidate).is_none() 
     }
 
     pub fn context(&self) -> &ApprovalContext { &self.context }
@@ -329,6 +352,23 @@ impl Tracker {
         .expect("Oops, we've some foreign type as Criteria::Story!")
     }
 
+    /// Read individual candidate's tracker
+    ///
+    /// Useful for `targets` and maybe `is_approved_before` methods of `CandidateTracker`.
+    pub fn candidate(&self, paraid: &ParaId) -> AssignmentResult<&CandidateTracker>
+    {
+        self.candidates.get(paraid)
+            .ok_or(Error::BadAssignment("Absent ParaId"))
+    }
+
+    /// Access individual candidate's tracker mutably
+    ///
+    /// Useful for `approve` method of `CandidateTracker`.
+    pub fn candidate_mut(&mut self, paraid: &ParaId) -> AssignmentResult<&mut CandidateTracker> {
+        self.candidates.get_mut(paraid)
+            .ok_or(Error::BadAssignment("Absent ParaId"))
+    }
+
     /// Insert assignment verified elsewhere
     pub(super) fn insert_assignment<C>(&mut self, a: Assignment<C>, mine: bool) -> AssignmentResult<()> 
     where C: Criteria, Assignment<C>: Position,
@@ -336,12 +376,14 @@ impl Tracker {
         let checker = a.checker().clone();
         let paraid = a.paraid(&self.context)
             .ok_or(Error::BadAssignment("Insert attempted on missing ParaId.")) ?;
-        let candidate = self.candidates.entry(paraid).or_insert(CandidateTracker::default());
+        // let candidate = self.candidate_mut(&paraid);
+        let candidate = self.candidates.get_mut(&paraid)
+            .ok_or(Error::BadAssignment("Absent ParaId")) ?;
         // We must handle some duplicate assignments because checkers
         // could be assigned under both RelayVRF* and RelayEquivocation
         if let Some(cs) = candidate.checkers.get_mut(&checker) { 
             if cs.mine != mine {
-                return Err(Error::BadAssignment("Attempted to verify my own assignment!"));
+                return Err(Error::BadAssignment("Attempted inserting assignment with disagreement over it being mine!"));
             }
         }
         candidate.access_criteria_mut::<C>().insert_assignment_checked(a,&self.context) ?;
@@ -374,21 +416,6 @@ impl Tracker {
         }
         let a = self.verify_only(a) ?;
         self.insert_assignment(a,false)
-    }
-
-    /// Read individual candidate's tracker
-    ///
-    /// Useful for `targets` and maybe `is_approved_before` methods of `CandidateTracker`.
-    pub fn candidate(&self, paraid: &ParaId) -> AssignmentResult<&CandidateTracker>
-    {
-        self.candidates.get(paraid).ok_or(Error::BadAssignment("Absent ParaId"))
-    }
-
-    /// Access individual candidate's tracker mutably
-    ///
-    /// Useful for `approve` method of `CandidateTracker`.
-    pub fn candidate_mut(&mut self, paraid: &ParaId) -> AssignmentResult<&mut CandidateTracker> {
-        self.candidates.get_mut(paraid).ok_or(Error::BadAssignment("Absent ParaId"))
     }
 
     pub fn current_anv_slot(&self) -> u64 { self.current_slot }
