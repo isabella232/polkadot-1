@@ -165,6 +165,10 @@ impl Announcer {
                 .expect("Announcing assignment for `ParaId` not assigned to any core.");
             let a = a.sign(&context, &self.myself, recieved);
             let a_signed = a.to_signed(context);
+            // Importantly `insert_assignment` computes delay tranche
+            // from the assignment which determines priority.  We may
+            // have extra delay in `a.vrf_signature.recieved` which
+            // only determines when it becomes a no show.
             self.tracker.insert_assignment(a,true)
             .expect("First, we insert only for paraids assigned to cores here because this assignment gets fixed by the relay chain block.  Second, we restrict each criteria to doing only one assignment per paraid, so we cannot find any duplicates.  Also, we've already removed the pending assignment above, making `candidate.checkers` empty.");
             self.access_announced_mut::<C>().0.insert(paraid,a_signed);

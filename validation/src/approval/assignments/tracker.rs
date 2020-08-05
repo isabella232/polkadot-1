@@ -242,40 +242,38 @@ impl CandidateTracker {
             target:   self.targets.target::<S>(),
             approved: 0, 
             waiting:  0, 
-            noshows:  0, 
+            noshows:  0,
+            debt:     0,
             assigned: 0
         };
-        // We track total noshows in c so we need a seperate local no show counter here.
-        let mut noshows = 0;
 
         let mut noshow_timeout = self.targets.noshow_timeout;
         // We do not count tranches for which we should not yet have
         // recieved any assignments, even though we do store early
         // announcements.
         while c.tranche + noshow_timeout < now + self.targets.noshow_timeout {
-            let d = self.counter::<S>(tranche, noshow_timeout);
+            let d = self.counter::<S>(c.tranche, noshow_timeout);
             c.assigned += d.assigned;
             c.waiting  += d.waiting;
             c.noshows  += d.noshows;
-            noshows    += d.noshows;
+            c.debt     += d.noshows;
             c.approved += d.approved;
             c.tranche += 1;
 
             // Consider later tranches if not enough asignees yet
-            if c.assigned < c.target { continue; }
+            if c.assigned <= c.target { continue; }
             // Ignore later tranches if we've enough assignees and no no shows
-            if noshows == 0 { break; }
+            if c.debt == 0 { break; }
             // We replace no shows by increasing our target when
             // reaching our initial or any subseuent target.
             // We ask for two new checkers per no show here,
             // acording to the analysis (TODO: Alistair)
-            c.target = c.assigned + c.noshows;
-            noshows = 0;
+            c.target = c.assigned; // + c.debt;
+            c.debt = 0;
             // We view tranches as later for being counted no show
             // since they announced much latter.
             noshow_timeout += self.targets.noshow_timeout; 
         }
-        c.waiting += noshows;
         c
     }
 

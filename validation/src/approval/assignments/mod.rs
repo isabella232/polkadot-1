@@ -74,8 +74,11 @@ pub struct ApprovalStatus {
     pub assigned: u32,
     /// Awating approvals, including no shows.
     pub waiting: u32,
-    /// Total no shows, both replaced and waiting.
+    /// Total no shows, including our debt.
     pub noshows: u32,
+    /// Any no shows not yet addressed by additional tranches,
+    /// often zero since adding extra tranches pays the debt fast.
+    pub debt: u32,
     /// Approval votes thus far.
     pub approved: u32,
 }
