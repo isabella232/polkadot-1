@@ -200,14 +200,13 @@ impl<C> Assignment<C,()> where C: Criteria {
         checker: &Keypair,
         recieved: DelayTranche,
     ) -> Assignment<C> {
-        let Assignment { criteria, vrf_signature: (), vrf_inout } = self;
         // Must exactly mirror `schnorrkel::Keypair::vrf_sign_extra`
         // or else rerun one point multiplicaiton in vrf_create_hash
-        let t = criteria.extra(context);
-        let vrf_proof = checker.dleq_proove(t, vrf_inout, vrf::KUSAMA_VRF).0.to_bytes();
+        let t = self.criteria.extra(context);
+        let vrf_proof = checker.dleq_proove(t, &self.vrf_inout, vrf::KUSAMA_VRF).0.to_bytes();
         let checker = validator_id_from_key(&checker.public);
         let vrf_signature = AssignmentSignature { checker, vrf_proof, recieved };
-        Assignment { criteria: criteria.clone(), vrf_signature, vrf_inout: vrf_inout.clone(), }
+        Assignment { criteria: self.criteria.clone(), vrf_signature, vrf_inout: self.vrf_inout.clone(), }
     }
 }
 
@@ -220,19 +219,18 @@ pub struct AssignmentSignature {
     /// DLEQ Proof of the VRF mapping the story to pre-output,
     /// and singing the context as well.
     vrf_proof: [u8; vrf::VRF_PROOF_LENGTH],
-    /// Actualy delay tranche when we recieved this announcement.
+    /// Actual delay tranche when we recieved this announcement.
     ///
     /// We never transfer this inside the `SignedAssignment`, but
-    /// compute it outrelves when deserializing assignment notices.  
-    /// It prevents us counting checkers as no shows too early,
-    /// which permits delayed annoucements and improves workload
-    /// balancing.  
+    /// compute it outrelves when verifying assignment notices.  
+    /// It prevents us counting late announcements as no shows too
+    /// early, which permits delayed annoucements, such as caused
+    /// by others' being no shows or to improve workload balancing.  
     recieved: DelayTranche,
 }
 
-
 /// Announcable VRF signed assignment
-pub struct AssignmentSigned<C: Criteria> {
+pub struct AssignmentSigned<C> {
     context: ApprovalContext,
     criteria: C,
     /// Signer's public key
@@ -247,6 +245,7 @@ pub struct AssignmentSigned<C: Criteria> {
 }
 
 impl<C: Criteria> AssignmentSigned<C> {
+    /// Get checker identity
     pub fn checker(&self) -> &ValidatorId { &self.checker }
 
     /// Get publickey identifying checker
@@ -277,6 +276,23 @@ impl<C: Criteria> AssignmentSigned<C> {
         let _ = checker_pk.dleq_verify(t, &vrf_inout, &vrf_proof, vrf::KUSAMA_VRF)
             .map_err(|_| Error::BadAssignment("Bad VRF signature (invalid)")) ?;
         Ok((context, Assignment { criteria: criteria.clone(), vrf_signature, vrf_inout, }))
+    }
+
+    pub(super) fn serialize(&self) -> Vec<u8> {
+        unimplemented!()
+    }
+}
+
+
+pub(crate) enum SomeCriteria {
+    RelayVRFModulo(RelayVRFModulo),
+    RelayVRFDelay(RelayVRFDelay),
+    RelayEquivocation(RelayEquivocation),
+}
+
+impl AssignmentSigned<SomeCriteria> {
+    pub(super) fn deserialize(buf: &[u8]) -> AssignmentSigned<SomeCriteria> {
+        unimplemented!()
     }
 }
 

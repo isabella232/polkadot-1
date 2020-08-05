@@ -177,6 +177,8 @@ impl CandidateTracker {
     /// We accept and correctly process premature approve calls, but
     /// our current scheme makes counting approvals slightly slower.
     /// We can optimize performance later with slightly more complex code.
+    ///
+    /// Rejects approving your own assignments.
     pub fn approve_others(&mut self, checker: ValidatorId) -> AssignmentResult<()> {
         self.approve(checker, false)
     }
@@ -347,15 +349,30 @@ impl Tracker {
         Ok(())        
     }
 
-    /// Insert an assignment after verifying its signature 
-    pub(super) fn verify_and_insert<C>(&mut self, a: &AssignmentSigned<C>)
-     -> AssignmentResult<()> 
+    /// Verify an assignments signature without inserting
+    pub(super) fn verify_only<C>(&self, a: &AssignmentSigned<C>)
+     -> AssignmentResult<Assignment<C>> 
     where C: Criteria, Assignment<C>: Position,
     {
         let (context,a) = a.verify(self.access_story::<C>(), self.current_delay_tranche()) ?;
         if *context != self.context { 
             return Err(Error::BadAssignment("Incorrect ApprovalContext"));
         }
+        Ok(a)
+    }
+
+    /// Insert an assignment after verifying its signature 
+    pub(super) fn verify_and_insert<C>(
+        &mut self, 
+        a: &AssignmentSigned<C>, 
+        myself: Option<ValidatorId>)
+     -> AssignmentResult<()> 
+    where C: Criteria, Assignment<C>: Position,
+    {
+        if myself.as_ref() == Some(a.checker()) {
+            return Err(Error::BadAssignment("Attempted verification of my own "));
+        }
+        let a = self.verify_only(a) ?;
         self.insert_assignment(a,false)
     }
 
@@ -421,8 +438,14 @@ impl ops::DerefMut for Watcher {
 }
 
 impl Watcher {
-    /// 
-    pub fn increase_anv_slot(&mut self, slot: u64) {
+    /// Advances the AnV slot aka time to the specified value. 
+    pub fn advance_anv_slot(&mut self, slot: u64) {
         self.tracker.current_slot = max(self.tracker.current_slot, slot);
     }
+
+    /// Insert an assignment notice after verifying its signature 
+    pub fn import_others(&mut self, a: &[u8]) -> AssignmentResult<()> {
+        unimplemented!();  // deserialize
+    }
+
 }

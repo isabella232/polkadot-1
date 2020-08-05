@@ -171,16 +171,19 @@ impl Announcer {
         }
     }
 
-    pub fn increase_anv_slot(&mut self, new_slot: u64) {
+    /// Advances the AnV slot aka time to the specified value,
+    /// enquing any pending announcements too.
+    pub fn advance_anv_slot(&mut self, new_slot: u64) {
         if new_slot <= self.tracker.current_slot { return; }
         let new_delay_tranche = self.delay_tranche(new_slot)
             .expect("new_slot > current_slot > context.anv_slot_number");
         let r = self.current_delay_tranche()..new_delay_tranche;
+        // NOPE NOPE
         self.announce_pending::<criteria::RelayVRFDelay,_>(r.clone());
         self.announce_pending::<criteria::RelayEquivocation,_>(r);
         self.tracker.current_slot = new_slot;
     }
-    
+
     /// Mark myself as approving this candiddate
     pub fn approve_mine(&mut self, paraid: &ParaId) -> AssignmentResult<()> {
         let myself = self.id();
