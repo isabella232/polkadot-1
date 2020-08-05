@@ -216,10 +216,10 @@ impl CandidateTracker {
     /// Returns the approved and absent counts of validtors assigned
     /// by either `RelayVRFStory` or `RelayWquivocationStory`, and
     /// within the given range.
-    fn range_counter<S: 'static,R>(&self, r: R, noshow: DelayTranche) -> Counter
-    where R: ::std::ops::RangeBounds<DelayTranche> + Clone
+    fn counter<S: 'static>(&self, tranche: DelayTranche, noshow: DelayTranche) -> Counter
     {
         use core::any::TypeId;
+        let r = tranche..tranche+1;
         let s = TypeId::of::<S>();
         if s == TypeId::of::<stories::RelayVRFStory>() {
             let x = self.relay_vrf_modulo.range(r.clone())  // Always delay_tranche=0
@@ -253,7 +253,7 @@ impl CandidateTracker {
         // recieved any assignments, even though we do store early
         // announcements.
         while c.tranche + noshow_timeout < now + self.targets.noshow_timeout {
-            let d = self.range_counter::<S,_>(c.tranche..c.tranche+1, noshow_timeout);
+            let d = self.counter::<S>(tranche, noshow_timeout);
             c.assigned += d.assigned;
             c.waiting  += d.waiting;
             c.noshows  += d.noshows;
