@@ -355,14 +355,14 @@ impl DelayCriteria for RelayVRFDelay {
 }
 impl DelayCriteria for RelayEquivocation {
     fn paraid(&self) -> ParaId { self.paraid }
-    /// Allocates an expected four times the number of backing checkers
-    /// into delay tranch zero, so that they always check.
+    /// Assigns twelve tranches worth of checks into delay tranch zero,
+    /// meaning they always check candidate equivocations.
     ///
     /// We do need some consolodation at zero for `RelayEquivocation`.
     /// We considered some modulo condition using relay chain block hashes,
     /// except we're already slashing someone for equivocation, so being
     /// less efficent hurts less than the extra code complexity.
-    fn zeroth_delay_tranche_width() -> DelayTranche { 7 } // 8
+    fn zeroth_delay_tranche_width() -> DelayTranche { 11 } // 12
 }
 
 impl<C,K> Position for Assignment<C,K> where C: DelayCriteria {

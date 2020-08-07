@@ -323,7 +323,8 @@ impl Tracker {
     /// Initialize tracking a candidate.
     ///
     /// Invoke this for all desired candidates before invoking
-    /// the `into_watcher` or `into_announcer` builders.
+    /// the `into_watcher` or `into_announcer` builders, normally.
+    /// Add all candidates from `CandidateEvents`.
     ///
     /// Returns `false` if this invokation reinitalized an
     /// existing candidate, maybe harmless maybe not.
