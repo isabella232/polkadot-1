@@ -57,7 +57,17 @@ where C: Criteria, Assignment<C,K>: Position,
     {
         self.0.range(r).map( |(_,v)| v.iter() ).flatten()
     }
+}
 
+impl<C> AssignmentsByDelay<C,()> 
+where C: Criteria, Assignment<C,()>: Position,
+{
+    /// Remove entire tranche from pending announcements
+    ///
+    /// TODO: Should this contain max paramateter and randomly advance
+    /// any excessive annoucements?  Should the announcer do this
+    /// internally?  Or should all scheduling decissions be made in
+    /// advnace?
     pub(super) fn pull_tranche(&mut self, delay_tranche: DelayTranche)
      -> Option<Vec< Assignment<C,K> >> 
     {
