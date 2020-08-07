@@ -308,13 +308,12 @@ pub struct Tracker {
 }
 
 impl Tracker {
-    /// Create a tracker 
+    /// Create a tracker to build a `Watcher` or `Announcer`
     pub fn new(context: ApprovalContext, target: u16) -> AssignmentResult<Tracker> {
         let current_slot = context.anv_slot_number();
         // TODO: Improve `stories::*::new()` methods
-        let header = unimplemented!();
-        let relay_vrf_story = context.new_vrf_story(header,unimplemented!()) ?;
-        let relay_equivocation_story = unimplemented!(); // stories::RelayEquivocationStory::new(header);
+        let relay_vrf_story = context.new_vrf_story() ?;
+        let relay_equivocation_story = context.new_equivocation_story(); 
         let candidates = BTreeMap::new();
         // TODO: Add parachain candidates here maybe ??
         Ok(Tracker { context, current_slot, relay_vrf_story, relay_equivocation_story, candidates, })

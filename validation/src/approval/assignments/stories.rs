@@ -135,22 +135,25 @@ impl ApprovalContext {
     ///
     /// We must only revalidate the relay chain VRF, by supplying the proof,
     /// if we have not already done so when importing the block.
-    pub fn new_vrf_story(&self, _header: Header, proof: Option<&::schnorrkel::vrf::VRFProof>)
+    pub fn new_vrf_story(&self)
      -> AssignmentResult<RelayVRFStory> 
     {
+        let header = self.fetch_header();
         let vrf_t = make_transcript(
             &self.fetch_epoch().randomness, 
             self.slot, 
             self.epoch // == self.epoch().epoch_index,
         );
-
+        // TODO: Should we check this block's proof again?  I suppose no, but..
+        let vrf_proof: Option<&::schnorrkel::vrf::VRFProof> = None;
+        
         let authority_id: AuthorityId = unimplemented!();
         use primitives::crypto::Public;
         let publickey = ::schnorrkel::PublicKey::from_bytes(&authority_id.to_raw_vec()) // Vec WTF?!?
             .map_err(|_| Error::BadStory("Relay chain block authorized by improper sr25519 public key")) ?;
 
         let vrf_preout = unimplemented!();
-        let vrf_io = if let Some(pr) = proof {
+        let vrf_io = if let Some(pr) = vrf_proof {
             publickey.vrf_verify(vrf_t,vrf_preout,pr)
             .map_err(|_| Error::BadStory("Relay chain block VRF failed validation")) ?.0
         } else {
@@ -193,7 +196,6 @@ pub struct RelayEquivocationStory {
 }
 
 impl RelayEquivocationStory {
-    /*
     /// Add any candidate equivocations found within a relay chain equivocation.
     ///
     /// We define a candidate equivocation in a relay chain block X as
@@ -207,12 +209,17 @@ impl RelayEquivocationStory {
     pub fn add_equivocation(&mut self, ep: &EquivocationProof<Header>) 
      -> AssignmentResult<()>
     {
-        let slot = ep.slot();
-        let header = [ep.fst_header(), ep.snd_header()].iter()
-            .find(|h| h.hash() == self.header().hash)
+        let slot = ep.slot_number;
+        let headers = [&ep.first_header, &ep.second_header];
+        let (i,our_header) = headers.iter()
+            .enumerate()
+            .find( |(_,h)| h.hash() == self.header.hash() )
             .ok_or(Error::BadStory("Cannot add unrelated equivocation proof.")) ?;
-        unimplemented!() // TODO: Iterate over candidate and add to self.candidate_equivocations any that exist under fst_header, but differ or do not exist in snd_header
-    }
-    */
+        let other_header = headers[1-i];
+        self.relay_equivocations.push(other_header.clone());
+
+        unimplemented!() 
+        // TODO: Iterate over candidates in our_header and add to self.candidate_equivocations any that differ or do not exist in other_header.  We should restrict to tracker.candidates somehow if initalize_candidate could be called on fewer than all candidates, but we'll leave this code here until we descide if we want that functionality.  
+        }
 }
 
