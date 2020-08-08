@@ -34,12 +34,6 @@ impl<C: Criteria> Default for AssignmentsByDelay<C,()> {
 impl<C,K> AssignmentsByDelay<C,K> 
 where C: Criteria, Assignment<C,K>: Position,
 {
-    fn bucket_mut(&mut self, delay_tranche: DelayTranche)
-     -> Option<&mut Vec< Assignment<C,K> >> 
-    {
-        self.0.get_mut(&delay_tranche)
-    }
-
     /// Add new `Assignment` avoiding inserting any duplicates.
     ///
     /// Assumes there is only one valid delay value determined by
@@ -51,7 +45,7 @@ where C: Criteria, Assignment<C,K>: Position,
         delay_tranche
     }
 
-    /// Iterate immutably over checkers.
+    /// Iterate immutably over all assignments within the given tranche assignment range.
     fn range<R>(&self, r: R) -> impl Iterator<Item=&Assignment<C,K>>
     where R: ::std::ops::RangeBounds<DelayTranche>,
     {
@@ -59,25 +53,19 @@ where C: Criteria, Assignment<C,K>: Position,
     }
 }
 
-impl<C> AssignmentsByDelay<C,()> 
-where C: Criteria, Assignment<C,()>: Position,
-{
-    /// Remove entire tranche from pending announcements
-    ///
-    /// TODO: Should this contain max paramateter and randomly advance
-    /// any excessive annoucements?  Should the announcer do this
-    /// internally?  Or should all scheduling decissions be made in
-    /// advnace?
-    pub(super) fn pull_tranche(&mut self, delay_tranche: DelayTranche)
-     -> Option<Vec< Assignment<C,K> >> 
-    {
-        self.0.remove(&delay_tranche)
-    }
-}
-
 impl<C> AssignmentsByDelay<C> 
 where C: Criteria, Assignment<C>: Position,
-{    
+{
+    /// Iterate over all checkers, and their actual recieved times,
+    /// in the given tranche assignment, always earlier than the
+    /// recieved time.
+    fn iter_checker_n_recieved(&self, tranche: DelayTranche)
+     -> impl Iterator<Item=(ValidatorId,DelayTranche)> + '_
+    {
+        // We use `btree_map::Range` as a hack to handle `tranche` being invalid well.
+        self.range(tranche..tranche+1).map( |a| a.checker_n_recieved() )
+    }
+
     /// Add new `Assignment` avoiding inserting any duplicates.
     ///
     /// Assumes there is only one valid delay value determined by
@@ -93,6 +81,22 @@ where C: Criteria, Assignment<C>: Position,
         // debug_assert!( !v.iter().any( |a0| a0.checker() == a.checker() ) );
         v.push(a);
         Ok(delay_tranche)
+    }
+}
+
+impl<C> AssignmentsByDelay<C,()> 
+where C: Criteria, Assignment<C,()>: Position,
+{
+    /// Remove entire tranche from pending announcements
+    ///
+    /// TODO: Should this contain max paramateter and randomly advance
+    /// any excessive annoucements?  Should the announcer do this
+    /// internally?  Or should all scheduling decissions be made in
+    /// advnace?
+    pub(super) fn pull_tranche(&mut self, delay_tranche: DelayTranche)
+     -> Option<Vec< Assignment<C,()> >> 
+    {
+        self.0.remove(&delay_tranche)
     }
 }
 
@@ -200,7 +204,7 @@ impl CandidateTracker {
     /// makes results meaningless if you want them counted, but
     /// this behavior makes sense assuming checkers contains every
     /// validator discussed elsewhere, including ourselves.
-    fn counter_helper<I>(&self, iter: I, noshow: DelayTranche) -> Counter
+    fn asignee_counter<I>(&self, iter: I, noshow_tranche: DelayTranche) -> Counter
     where I: Iterator<Item=(ValidatorId,DelayTranche)>
     {
         let mut cm: HashMap<ValidatorId,DelayTranche> = HashMap::new(); // Deduplicate iter
@@ -216,7 +220,7 @@ impl CandidateTracker {
             } // TODO:  Internal error log?
         }
         let mut waiting = cm.len() as u32;
-        let noshows = cm.values().cloned().filter(|r: &u32| *r < noshow).count() as u32;
+        let noshows = cm.values().cloned().filter(|r: &u32| *r < noshow_tranche).count() as u32;
         let approved = assigned - waiting;
         waiting -= noshows;
         debug_assert!( assigned == approved + waiting + noshows );
@@ -226,20 +230,21 @@ impl CandidateTracker {
     /// Returns the approved and absent counts of validtors assigned
     /// by either `RelayVRFStory` or `RelayWquivocationStory`, and
     /// within the given range.
-    fn counter<S: 'static>(&self, tranche: DelayTranche, noshow: DelayTranche) -> Counter
+    fn count_asignees_in_tranche<S: 'static>(
+        &self, 
+        tranche: DelayTranche, 
+        noshow_tranche: DelayTranche
+    ) -> Counter
     {
         use core::any::TypeId;
-        let r = tranche..tranche+1;
         let s = TypeId::of::<S>();
         if s == TypeId::of::<stories::RelayVRFStory>() {
-            let x = self.relay_vrf_modulo.range(r.clone())  // Always delay_tranche=0
-                .map( |a| a.checker_n_recieved() );
-            let y = self.relay_vrf_delay.range(r)
-                .map( |a| a.checker_n_recieved() );
-            self.counter_helper( x.chain(y), noshow )
+            let x = self.relay_vrf_modulo.iter_checker_n_recieved(tranche);
+            let y = self.relay_vrf_delay.iter_checker_n_recieved(tranche);
+            self.asignee_counter( x.chain(y), noshow_tranche )
         } else if s == TypeId::of::<stories::RelayEquivocationStory>() {
-            let z = self.relay_equivocation.range(r).map( |a| a.checker_n_recieved() );
-            self.counter_helper(z, noshow)
+            let z = self.relay_equivocation.iter_checker_n_recieved(tranche);
+            self.asignee_counter(z, noshow_tranche)
         } else { panic!("Oops, we've some foreign type for Criteria::Story!") }
     }
 
@@ -262,7 +267,7 @@ impl CandidateTracker {
         // recieved any assignments, even though we do store early
         // announcements.
         while c.tranche + noshow_timeout < now + self.targets.noshow_timeout {
-            let d = self.counter::<S>(c.tranche, noshow_timeout);
+            let d = self.count_asignees_in_tranche::<S>(c.tranche, noshow_timeout);
             c.assigned += d.assigned;
             c.waiting  += d.waiting;
             c.noshows  += d.noshows;
