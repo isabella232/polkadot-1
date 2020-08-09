@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, hash_map::Entry};
 use crate::Error;
 
 use super::{
-    ApprovalContext, ApprovalTargets, ApprovalStatus, AssignmentResult,
+    ApprovalContext, ApprovalTargets, AssigneeStatus, AssignmentResult,
     Hash, ParaId, DelayTranche,
     stories,
     criteria::{self, Assignment, AssignmentSigned, Criteria, Position},
@@ -250,11 +250,11 @@ impl CandidateTracker {
 
     /// Recompute our current approval progress number
     pub fn assignee_tracker<S: 'static>(&self, now: DelayTranche)
-     -> impl Iterator<Item=ApprovalStatus> + '_
+     -> impl Iterator<Item=AssigneeStatus> + '_
     {
         let mut done = false;
         // We account for no shows in multiple tranches by increasing the no show timeout
-        let mut c = ApprovalStatus {
+        let mut c = AssigneeStatus {
             tranche:  0,
             target:   self.targets.target::<S>(),
             approved: 0, 
@@ -312,7 +312,7 @@ impl CandidateTracker {
         // c
     }
 
-    pub fn approval_status<S: 'static>(&self, now: DelayTranche) -> ApprovalStatus {
+    pub fn approval_status<S: 'static>(&self, now: DelayTranche) -> AssigneeStatus {
         self.assignee_tracker::<S>(now)
         .last().expect("Our closure returns None only with tranche > 0, qed")
     }

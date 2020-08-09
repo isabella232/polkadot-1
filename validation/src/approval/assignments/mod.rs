@@ -66,7 +66,7 @@ impl ApprovalTargets {
 
 /// 
 #[derive(Clone)]
-pub struct ApprovalStatus {
+pub struct AssigneeStatus {
     /// Highest tranche considered
     pub tranche: DelayTranche,
     /// Assignement target, including increases due to no shows.
@@ -84,7 +84,7 @@ pub struct ApprovalStatus {
     pub approved: u32,
 }
 
-impl ApprovalStatus {
+impl AssigneeStatus {
     pub fn is_approved(&self) -> bool {
         debug_assert!(self.assigned == self.assigned + self.waiting);
         self.target == self.approved && self.approved == self.assigned && self.waiting == 0
