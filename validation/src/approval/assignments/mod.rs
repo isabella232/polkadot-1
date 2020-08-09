@@ -65,6 +65,7 @@ impl ApprovalTargets {
 
 
 /// 
+#[derive(Clone)]
 pub struct ApprovalStatus {
     /// Highest tranche considered
     pub tranche: DelayTranche,

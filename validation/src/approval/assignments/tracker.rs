@@ -249,8 +249,10 @@ impl CandidateTracker {
     }
 
     /// Recompute our current approval progress number
-    pub fn approval_status<S: 'static>(&self, now: DelayTranche) -> ApprovalStatus 
+    pub fn asignee_tracker<S: 'static>(&self, now: DelayTranche)
+     -> impl Iterator<Item=ApprovalStatus> + '_
     {
+        let mut done = false;
         // We account for no shows in multiple tranches by increasing the no show timeout
         let mut c = ApprovalStatus {
             tranche:  0,
@@ -261,12 +263,20 @@ impl CandidateTracker {
             debt:     0,
             assigned: 0
         };
-
         let mut noshow_timeout = self.targets.noshow_timeout;
-        // We do not count tranches for which we should not yet have
-        // recieved any assignments, even though we do store early
-        // announcements.
-        while c.tranche + noshow_timeout < now + self.targets.noshow_timeout {
+
+        // We fuse using `done` but we neglect `impl FusedIterator`
+        // because this version reads nicely like the while loop and
+        // we invoke it only twice per second or so anyways.
+        ::core::iter::from_fn( move || {
+            // We do not count tranches for which we should not yet have
+            // recieved any assignments, even though we do store early
+            // announcements.
+            if done || c.tranche + noshow_timeout > now + self.targets.noshow_timeout {
+                return None;
+            }
+            // === while c.tranche + noshow_timeout <= now + self.targets.noshow_timeout
+
             let d = self.count_asignees_in_tranche::<S>(c.tranche, noshow_timeout);
             c.assigned += d.assigned;
             c.waiting  += d.waiting;
@@ -276,9 +286,16 @@ impl CandidateTracker {
             c.tranche += 1;
 
             // Consider later tranches if not enough asignees yet
-            if c.assigned <= c.target { continue; }
+            if c.assigned <= c.target {
+                return Some(c.clone()); 
+                // === continue;
+            }
             // Ignore later tranches if we've enough assignees and no no shows
-            if c.debt == 0 { break; }
+            if c.debt == 0 {
+                done = true;
+                return Some(c.clone());
+                // === break;
+            }
             // We replace no shows by increasing our target when
             // reaching our initial or any subseuent target.
             // We ask for two new checkers per no show here,
@@ -287,9 +304,17 @@ impl CandidateTracker {
             c.debt = 0;
             // We view tranches as later for being counted no show
             // since they announced much latter.
-            noshow_timeout += self.targets.noshow_timeout; 
-        }
-        c
+            noshow_timeout += self.targets.noshow_timeout;
+
+            return Some(c.clone()); 
+            // === continue;
+            } ) // .fuse() // rustc could maybe optimize this away
+        // c
+    }
+
+    pub fn approval_status<S: 'static>(&self, now: DelayTranche) -> ApprovalStatus {
+        self.asignee_tracker::<S>(now)
+        .last().expect("Our closure returns None only with tranche > 0, qed")
     }
 
     pub fn is_approved_before(&self, now: DelayTranche) -> bool {
