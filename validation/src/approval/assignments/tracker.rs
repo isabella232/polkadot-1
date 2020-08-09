@@ -204,7 +204,7 @@ impl CandidateTracker {
     /// makes results meaningless if you want them counted, but
     /// this behavior makes sense assuming checkers contains every
     /// validator discussed elsewhere, including ourselves.
-    fn assignee_counter<I>(&self, iter: I, noshow_tranche: DelayTranche) -> Counter
+    fn assignee_counter<I>(&self, iter: I, noshow_tranche: DelayTranche) -> Counts
     where I: Iterator<Item=(ValidatorId,DelayTranche)>
     {
         let mut cm: HashMap<ValidatorId,DelayTranche> = HashMap::new(); // Deduplicate iter
@@ -224,7 +224,7 @@ impl CandidateTracker {
         let approved = assigned - waiting;
         waiting -= noshows;
         debug_assert!( assigned == approved + waiting + noshows );
-        Counter { approved, waiting, noshows, assigned }
+        Counts { approved, waiting, noshows, assigned }
     }
 
     /// Returns the approved and absent counts of validtors assigned
@@ -234,7 +234,7 @@ impl CandidateTracker {
         &self, 
         tranche: DelayTranche, 
         noshow_tranche: DelayTranche
-    ) -> Counter
+    ) -> Counts
     {
         use core::any::TypeId;
         let s = TypeId::of::<S>();
@@ -323,7 +323,7 @@ impl CandidateTracker {
     }
 }
 
-struct Counter {
+struct Counts {
     /// Approval votes thus far
     approved: u32,
     /// Awaiting approval votes
