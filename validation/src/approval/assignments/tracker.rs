@@ -204,7 +204,7 @@ impl CandidateTracker {
     /// makes results meaningless if you want them counted, but
     /// this behavior makes sense assuming checkers contains every
     /// validator discussed elsewhere, including ourselves.
-    fn asignee_counter<I>(&self, iter: I, noshow_tranche: DelayTranche) -> Counter
+    fn assignee_counter<I>(&self, iter: I, noshow_tranche: DelayTranche) -> Counter
     where I: Iterator<Item=(ValidatorId,DelayTranche)>
     {
         let mut cm: HashMap<ValidatorId,DelayTranche> = HashMap::new(); // Deduplicate iter
@@ -230,7 +230,7 @@ impl CandidateTracker {
     /// Returns the approved and absent counts of validtors assigned
     /// by either `RelayVRFStory` or `RelayWquivocationStory`, and
     /// within the given range.
-    fn count_asignees_in_tranche<S: 'static>(
+    fn count_assignees_in_tranche<S: 'static>(
         &self, 
         tranche: DelayTranche, 
         noshow_tranche: DelayTranche
@@ -241,15 +241,15 @@ impl CandidateTracker {
         if s == TypeId::of::<stories::RelayVRFStory>() {
             let x = self.relay_vrf_modulo.iter_checker_n_recieved(tranche);
             let y = self.relay_vrf_delay.iter_checker_n_recieved(tranche);
-            self.asignee_counter( x.chain(y), noshow_tranche )
+            self.assignee_counter( x.chain(y), noshow_tranche )
         } else if s == TypeId::of::<stories::RelayEquivocationStory>() {
             let z = self.relay_equivocation.iter_checker_n_recieved(tranche);
-            self.asignee_counter(z, noshow_tranche)
+            self.assignee_counter(z, noshow_tranche)
         } else { panic!("Oops, we've some foreign type for Criteria::Story!") }
     }
 
     /// Recompute our current approval progress number
-    pub fn asignee_tracker<S: 'static>(&self, now: DelayTranche)
+    pub fn assignee_tracker<S: 'static>(&self, now: DelayTranche)
      -> impl Iterator<Item=ApprovalStatus> + '_
     {
         let mut done = false;
@@ -277,7 +277,7 @@ impl CandidateTracker {
             }
             // === while c.tranche + noshow_timeout <= now + self.targets.noshow_timeout
 
-            let d = self.count_asignees_in_tranche::<S>(c.tranche, noshow_timeout);
+            let d = self.count_assignees_in_tranche::<S>(c.tranche, noshow_timeout);
             c.assigned += d.assigned;
             c.waiting  += d.waiting;
             c.noshows  += d.noshows;
@@ -285,7 +285,7 @@ impl CandidateTracker {
             c.approved += d.approved;
             c.tranche += 1;
 
-            // Consider later tranches if not enough asignees yet
+            // Consider later tranches if not enough assignees yet
             if c.assigned <= c.target {
                 return Some(c.clone()); 
                 // === continue;
@@ -313,7 +313,7 @@ impl CandidateTracker {
     }
 
     pub fn approval_status<S: 'static>(&self, now: DelayTranche) -> ApprovalStatus {
-        self.asignee_tracker::<S>(now)
+        self.assignee_tracker::<S>(now)
         .last().expect("Our closure returns None only with tranche > 0, qed")
     }
 
