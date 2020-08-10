@@ -21,7 +21,8 @@ impl Tracker {
     /// Initialize tracking of both our own and others assignments and approvals
     pub fn into_announcer(self, myself: Keypair) -> AssignmentResult<Announcer> {
         let mut tracker = self;
-        let mut announced_relay_vrf_modulo = AssignmentsSigned::default();
+        let mut pending_relay_vrf_modulo = AssignmentsByDelay::default();
+        let mut no_duplicates = HashSet::new();
         for sample in 0..tracker.context().num_samples() {
             let a = Assignment::create(
                 criteria::RelayVRFModulo { sample }, 
@@ -31,25 +32,21 @@ impl Tracker {
             let context = tracker.context().clone();
             // We sample incorrect `ParaId`s here sometimes so just skip them.
             if let Some(paraid) = a.paraid(&context) {
-                // Add eah paraid only once.
-                if announced_relay_vrf_modulo.0.contains_key(&paraid) { continue; }
-                let recieved = 0; // TODO: Allow for late announcement
-                let a = a.sign(&context, &myself, recieved);
-                let a_signed = a.to_signed(context);
-                tracker.insert_assignment(a,true) ?;
-                announced_relay_vrf_modulo.0.insert(paraid,a_signed);
+                if ! no_duplicates.insert(paraid) { continue; }
+                pending_relay_vrf_modulo.insert_assignment_unchecked(a,&context);
             }
         }
         let mut selfy = Announcer { 
             tracker,  myself,
-            announced_relay_vrf_modulo,
+            pending_relay_vrf_modulo,
+            pending_relay_vrf_delay:       AssignmentsByDelay::default(),
+            pending_relay_equivocation:    AssignmentsByDelay::default(),
+            announced_relay_vrf_modulo:    AssignmentsSigned::default(),
             announced_relay_vrf_delay:     AssignmentsSigned::default(),
             announced_relay_equivocation:  AssignmentsSigned::default(),
-            pending_relay_vrf_delay:       AssignmentsByDelay::default(),
-            pending_relay_equivocation:   AssignmentsByDelay::default(),
         };
         for paraid in selfy.tracker.context().paraids_by_core().clone().iter().filter_map(Option::as_ref) {
-            selfy.create_pending(criteria::RelayVRFDelay { paraid: *paraid })
+            selfy.create_pending_delay(criteria::RelayVRFDelay { paraid: *paraid })
                 .expect("Assignment::create cannot fail for RelayVRFDelay, only RelayEquivocation, qed");
         }
         Ok(selfy)
@@ -75,9 +72,9 @@ pub struct Announcer {
     ///
     /// TODO: Actually substrate manages this another way, so change this part.
     myself: Keypair,
-    // /// Unannounced potential assignments with delay determined by relay chain VRF
-    // /// TODO: We'll need this once we add functionality to delay work
-    // pending_relay_vrf_modulo: AssignmentsByDelay<criteria::RelayVRFDelay,()>,
+    /// Unannounced potential assignments with delay determined by relay chain VRF
+    /// TODO: We'll need this once we add functionality to delay work
+    pending_relay_vrf_modulo: AssignmentsByDelay<criteria::RelayVRFModulo,()>,
     /// Unannounced potential assignments with delay determined by relay chain VRF
     pending_relay_vrf_delay: AssignmentsByDelay<criteria::RelayVRFDelay,()>,
     /// Unannounced potential assignments with delay determined by candidate equivocation
@@ -100,17 +97,19 @@ impl ops::DerefMut for Announcer {
 
 impl Announcer {
     fn access_pending_mut<C>(&mut self) -> &mut AssignmentsByDelay<C,()>
-    where C: DelayCriteria, Assignment<C>: Position,
+    where C: Criteria, Assignment<C>: Position,
     {
         use core::any::Any;
-        (&mut self.pending_relay_vrf_delay as &mut dyn Any)
+        (&mut self.pending_relay_vrf_modulo as &mut dyn Any)
             .downcast_mut::<AssignmentsByDelay<C,()>>()
+        .or( (&mut self.pending_relay_vrf_delay as &mut dyn Any)
+            .downcast_mut::<AssignmentsByDelay<C,()>>() )
         .or( (&mut self.pending_relay_equivocation as &mut dyn Any)
             .downcast_mut::<AssignmentsByDelay<C,()>>() )
         .expect("Oops, we've some foreign type or RelayVRFDelay as DelayCriteria!")
     }
 
-    fn create_pending<C>(&mut self, criteria: C) -> AssignmentResult<()>
+    fn create_pending_delay<C>(&mut self, criteria: C) -> AssignmentResult<()>
     where C: DelayCriteria, Assignment<C>: Position,
     {
         let context = self.tracker.context().clone();
@@ -138,7 +137,7 @@ impl Announcer {
 
     /// Access outgoing announcements set mutably 
     pub(super) fn access_announced_mut<C>(&mut self) -> &mut AssignmentsSigned<C>
-    where C: DelayCriteria, Assignment<C>: Position,
+    where C: Criteria,
     {
         use core::any::Any;
         (&mut self.announced_relay_vrf_modulo as &mut dyn Any)
@@ -155,7 +154,7 @@ impl Announcer {
     ///
     /// TODO: It'll be more efficent to operate on ranges here
     fn announce_pending_with<'a,C,F>(&'a mut self, tranche: DelayTranche, f: F)
-    where C: DelayCriteria, Assignment<C>: Position,
+    where C: Criteria, Assignment<C,()>: Position, Assignment<C>: Position,
           F: 'a + FnMut(&Assignment<C,()>) -> bool,
     {
         let mut vs: Vec<Assignment<C,()>> = self.access_pending_mut::<C>()
@@ -186,7 +185,7 @@ impl Announcer {
         context: &ApprovalContext,
         assignees: &mut HashMap<ParaId,AssigneeStatus>
     )
-    where C: DelayCriteria, Assignment<C>: Position,
+    where C: Criteria, Assignment<C,()>: Position,
     {
         self.announce_pending_with::<criteria::RelayVRFDelay,_>(tranche,
             |a| if let Some(paraid) = a.paraid(context) {
@@ -231,8 +230,8 @@ impl Announcer {
 
         let context = self.tracker.context().clone();
         for tranche in 0..now {
-            // self.announce_pending_from_assignees::<criteria::RelayVRFModulo>
-            //     (tranche, &context, &mut relay_vrf_assignees);
+            self.announce_pending_from_assignees::<criteria::RelayVRFModulo>
+                (tranche, &context, &mut relay_vrf_assignees);
             self.announce_pending_from_assignees::<criteria::RelayVRFDelay>
                 (tranche, &context, &mut relay_vrf_assignees);
             self.announce_pending_from_assignees::<criteria::RelayEquivocation>
@@ -251,5 +250,6 @@ impl Announcer {
         Ok(())
     }
 
+    // self.create_pending_delay(criteria::RelayEquivocation { paraid: *paraid })
 }
 
