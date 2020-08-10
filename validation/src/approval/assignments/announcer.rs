@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashSet, HashMap};
 use schnorrkel::{Keypair};
 
 use super::{
-    ApprovalContext, AssignmentResult, Hash, ParaId,
+    ApprovalContext, AssigneeStatus, AssignmentResult, Hash, ParaId,
     DelayTranche, 
     stories,
     criteria::{self, Assignment, AssignmentSigned, Criteria, DelayCriteria, Position},
@@ -150,8 +150,11 @@ impl Announcer {
         .expect("Oops, we've some foreign type as Criteria!")
     }
 
-    // TODO: It'll be more efficent to operate on ranges here
-    fn announce_pending<'a,C,F>(&'a mut self, tranche: DelayTranche, f: F)
+    /// Announce any unannounced assignments from the given tranche
+    /// as filtered by the provided closure.
+    ///
+    /// TODO: It'll be more efficent to operate on ranges here
+    fn announce_pending_with<'a,C,F>(&'a mut self, tranche: DelayTranche, f: F)
     where C: DelayCriteria, Assignment<C>: Position,
           F: 'a + FnMut(&Assignment<C,()>) -> bool,
     {
@@ -174,6 +177,30 @@ impl Announcer {
         }
     }
 
+    /// Announce any unannounced assignments from the given tranche
+    /// as filtered by the provided closure.
+    /// 
+    fn announce_pending_from_assignees<C>(
+        &mut self, 
+        tranche: DelayTranche,
+        context: &ApprovalContext,
+        assignees: &mut HashMap<ParaId,AssigneeStatus>
+    )
+    where C: DelayCriteria, Assignment<C>: Position,
+    {
+        self.announce_pending_with::<criteria::RelayVRFDelay,_>(tranche,
+            |a| if let Some(paraid) = a.paraid(context) {
+                let b = assignees.get(&paraid)
+                // We admit a.delay_tranche() < tranche here because
+                // `self.pending_*` could represent posponed work.
+                .filter( |c| a.delay_tranche(context) <= c.tranche().unwrap() )
+                .is_some();
+                if b { assignees.remove(&paraid); }
+                b
+            } else { false }
+        )
+    }
+
     /// Advances the AnV slot aka time to the specified value,
     /// enquing any pending announcements too.
     pub fn advance_anv_slot(&mut self, new_slot: u64) {
@@ -192,7 +219,8 @@ impl Announcer {
         for (paraid,candidate) in self.tracker.candidates() {
             // We cannot skip previously approved checks here because 
             // we could announce ourself as RelayEquivocation checkers
-            // even after fulfilling a RelayVRF assignment.
+            // even after fulfilling a RelayVRF assignment.  Yet, we'd
+            // love something like this, maybe two announced flags.
             // if candidate.is_approved_by_checker(&myself) { continue; }
 
             let c = candidate.assignee_status::<stories::RelayVRFStory>(now);
@@ -201,20 +229,14 @@ impl Announcer {
             if ! c.is_approved() { relay_equivocation_assignees.insert(*paraid,c); }
         }
 
+        let context = self.tracker.context().clone();
         for tranche in 0..now {
-            // We admit a.delay_tranche() < tranche here because
-            // `self.pending_*` could represent posponed work.
-            let context = self.tracker.context().clone();
-            self.announce_pending::<criteria::RelayVRFDelay,_>(tranche, |a| {
-                relay_vrf_assignees.get(& a.paraid(&context).unwrap())
-                .filter( |c| a.delay_tranche(&context) <= c.tranche().unwrap() )
-                .is_some()
-            } );
-            self.announce_pending::<criteria::RelayEquivocation,_>(tranche, |a| {
-                relay_equivocation_assignees.get(& a.paraid(&context).unwrap())
-                .filter( |c| a.delay_tranche(&context) <= c.tranche().unwrap() )
-                .is_some()
-            } );
+            // self.announce_pending_from_assignees::<criteria::RelayVRFModulo>
+            //     (tranche, &context, &mut relay_vrf_assignees);
+            self.announce_pending_from_assignees::<criteria::RelayVRFDelay>
+                (tranche, &context, &mut relay_vrf_assignees);
+            self.announce_pending_from_assignees::<criteria::RelayEquivocation>
+                (tranche, &context, &mut relay_equivocation_assignees);
             // We avoid recomputing assignee statuses inside this loop
             // becuase we never check any given candidate more than once
         }
