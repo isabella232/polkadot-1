@@ -3,7 +3,7 @@
 //! 
 
 use core::{ ops };
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, HashMap};
 
 use schnorrkel::{Keypair};
 
@@ -48,9 +48,9 @@ impl Tracker {
             pending_relay_vrf_delay:       AssignmentsByDelay::default(),
             pending_relay_equivocation:   AssignmentsByDelay::default(),
         };
-        for paraid in selfy.tracker.context().paraids_by_core().iter().filter_map(Option::as_ref) {
+        for paraid in selfy.tracker.context().paraids_by_core().clone().iter().filter_map(Option::as_ref) {
             selfy.create_pending(criteria::RelayVRFDelay { paraid: *paraid })
-            .expect("Assignment::create cannot fail for RelayVRFDelay, only RelayEquivocation, qed");
+                .expect("Assignment::create cannot fail for RelayVRFDelay, only RelayEquivocation, qed");
         }
         Ok(selfy)
     }
@@ -96,6 +96,12 @@ impl ops::DerefMut for Announcer {
 }
 
 impl Announcer {
+    /// Mark myself as approving this candiddate
+    pub fn approve_mine(&mut self, paraid: &ParaId) -> AssignmentResult<()> {
+        let myself = self.id();
+        self.tracker.candidate_mut(paraid)?.approve(myself, true)
+    }
+
     fn access_pending_mut<C>(&mut self) -> &mut AssignmentsByDelay<C,()>
     where C: DelayCriteria, Assignment<C>: Position,
     {
@@ -183,23 +189,67 @@ impl Announcer {
         // !! c.assigned < c.target !!
     }
 
+    /*
+    fn advance<S: 'static>(&mut self, now: u64) {
+    }
+
     /// Advances the AnV slot aka time to the specified value,
     /// enquing any pending announcements too.
     pub fn advance_anv_slot(&mut self, new_slot: u64) {
-        if new_slot <= self.tracker.current_slot { return; }
+        // We allow rerunning this with the current slot rightn ow, but..
+        if new_slot < self.tracker.current_slot { return; }
+
         let new_delay_tranche = self.delay_tranche(new_slot)
             .expect("new_slot > current_slot > context.anv_slot_number");
-        // NOPE NOPE
+        let tranche = self.current_delay_tranche();
+
+        // We first reconstruct the current assignee status for any unapproved
+        // sessions, including all current announcements.
+        let mut relay_vrf_asignees = HashMap::new();
+        let mut relay_equivocation_asignees = HashMap::new();
+        for (paraid,candidate) in self.tracker.candidates() {
+            let c = candidate.assignee_status::<stories::RelayVRFStory>(tranche);
+            if ! c.is_approved() { relay_vrf_asignees.insert(*paraid,c); }
+            let c = candidate.assignee_status::<stories::RelayEquivocationStory>(tranche);
+            if ! c.is_approved() { relay_equivocation_asignees.insert(*paraid,c); }
+        }
+
+
+
+        // Assignee counter trackers for each story and advanced up to the current state
+        let mut relay_vrf_asignees = self.asignee_tracker::<stories::RelayVRFStory>(new_slot);
+        let mut relay_vrf_status = relay_vrf_asignees.nth(self.tracker.current_slot);
+        debug_assert!(relay_vrf_status.tranche == self.tracker.current_slot);
+
+        let relay_equivocation_asignees = self.asignee_tracker::<stories::RelayEquivocationStory>(new_slot);
+        let mut relay_equivocation_status = relay_equivocation_asignees.nth(self.tracker.current_slot);
+        debug_assert!(relay_equivocation_status.tranche == self.tracker.current_slot);
+
+
+        let mut relay_vrf_asignees =
+            self.init_assignee_status::<stories::RelayVRFStory>();
+        let mut relay_equivocation_asignees =
+            self.init_assignee_status::<stories::RelayEquivocationStory>();
+        loop {
+            if let Some(t) = self.advance_assignee_status::<stories::RelayVRFStory>(now, relay_vrf_asignees.clone()) { }
+            if let Some(t) = self.advance_assignee_status::<stories::RelayEquivocationStory>(now, relay_equivocation_asignees.clone()) { }
+            
+        }
+
+
+
+        for tranche in self.tracker.current_slot..new_slot {
+            ;
+        }
+
+self.approval_status(now).is_approved()
+&& self.approval_status(now).is_approved()
+
 
         self.announce_pending::<criteria::RelayVRFDelay>(new_delay_tranche);
         self.announce_pending::<criteria::RelayEquivocation>(new_delay_tranche);
         self.tracker.current_slot = new_slot;
     }
-
-    /// Mark myself as approving this candiddate
-    pub fn approve_mine(&mut self, paraid: &ParaId) -> AssignmentResult<()> {
-        let myself = self.id();
-        self.tracker.candidate_mut(paraid)?.approve(myself, true)
-    }
+    */
 }
 

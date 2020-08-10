@@ -94,8 +94,12 @@ impl ApprovalContext {
     /// possess block production capability for most parachains.
     /// We still favor scheduling parathreads onto availability cores
     /// earlier rather than later however.
-    pub(super) fn paraids_by_core(&self) -> Arc<[Option<ParaId>]> {
+    pub(super) fn paraids_by_core(&self) -> &Arc<[Option<ParaId>]> {
         unimplemented!()
+    }
+
+    pub(super) fn paraids(&self) -> impl Iterator<Item=ParaId> + '_ {
+        self.paraids_by_core().iter().filter_map(Option::as_ref).cloned()
     }
 
     /// Assignments of `ParaId` to ailability cores for the current

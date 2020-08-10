@@ -204,7 +204,7 @@ impl CandidateTracker {
     /// makes results meaningless if you want them counted, but
     /// this behavior makes sense assuming checkers contains every
     /// validator discussed elsewhere, including ourselves.
-    fn assignee_counter<I>(&self, iter: I, noshow_tranche: DelayTranche) -> Counts
+    fn assignee_counts<I>(&self, iter: I, noshow_tranche: DelayTranche) -> Counts
     where I: Iterator<Item=(ValidatorId,DelayTranche)>
     {
         let mut cm: HashMap<ValidatorId,DelayTranche> = HashMap::new(); // Deduplicate iter
@@ -241,85 +241,87 @@ impl CandidateTracker {
         if s == TypeId::of::<stories::RelayVRFStory>() {
             let x = self.relay_vrf_modulo.iter_checker_n_recieved(tranche);
             let y = self.relay_vrf_delay.iter_checker_n_recieved(tranche);
-            self.assignee_counter( x.chain(y), noshow_tranche )
+            self.assignee_counts( x.chain(y), noshow_tranche )
         } else if s == TypeId::of::<stories::RelayEquivocationStory>() {
             let z = self.relay_equivocation.iter_checker_n_recieved(tranche);
-            self.assignee_counter(z, noshow_tranche)
+            self.assignee_counts(z, noshow_tranche)
         } else { panic!("Oops, we've some foreign type for Criteria::Story!") }
     }
 
-    /// Recompute our current approval progress number
-    pub fn assignee_tracker<S: 'static>(&self, now: DelayTranche)
-     -> impl Iterator<Item=AssigneeStatus> + '_
-    {
-        let mut done = false;
+    /// Initialize `AssigneeStatus` tracker before any delay tranches applied
+    pub(super) fn init_assignee_status<S: 'static>(&self) -> AssigneeStatus {
         // We account for no shows in multiple tranches by increasing the no show timeout
-        let mut c = AssigneeStatus {
+        AssigneeStatus {
             tranche:  0,
             target:   self.targets.target::<S>(),
             approved: 0, 
             waiting:  0, 
             noshows:  0,
             debt:     0,
-            assigned: 0
-        };
-        let mut noshow_timeout = self.targets.noshow_timeout;
-
-        // We fuse using `done` but we neglect `impl FusedIterator`
-        // because this version reads nicely like the while loop and
-        // we invoke it only twice per second or so anyways.
-        ::core::iter::from_fn( move || {
-            // We do not count tranches for which we should not yet have
-            // recieved any assignments, even though we do store early
-            // announcements.
-            if done || c.tranche + noshow_timeout > now + self.targets.noshow_timeout {
-                return None;
-            }
-            // === while c.tranche + noshow_timeout <= now + self.targets.noshow_timeout
-
-            let d = self.count_assignees_in_tranche::<S>(c.tranche, noshow_timeout);
-            c.assigned += d.assigned;
-            c.waiting  += d.waiting;
-            c.noshows  += d.noshows;
-            c.debt     += d.noshows;
-            c.approved += d.approved;
-            c.tranche += 1;
-
-            // Consider later tranches if not enough assignees yet
-            if c.assigned <= c.target {
-                return Some(c.clone()); 
-                // === continue;
-            }
-            // Ignore later tranches if we've enough assignees and no no shows
-            if c.debt == 0 {
-                done = true;
-                return Some(c.clone());
-                // === break;
-            }
-            // We replace no shows by increasing our target when
-            // reaching our initial or any subseuent target.
-            // We ask for two new checkers per no show here,
-            // acording to the analysis (TODO: Alistair)
-            c.target = c.assigned; // + c.debt;
-            c.debt = 0;
-            // We view tranches as later for being counted no show
-            // since they announced much latter.
-            noshow_timeout += self.targets.noshow_timeout;
-
-            return Some(c.clone()); 
-            // === continue;
-            } ) // .fuse() // rustc could maybe optimize this away
-        // c
+            assigned: 0,
+            noshow_timeout: self.targets.noshow_timeout,
+        }
     }
 
-    pub fn approval_status<S: 'static>(&self, now: DelayTranche) -> AssigneeStatus {
-        self.assignee_tracker::<S>(now)
-        .last().expect("Our closure returns None only with tranche > 0, qed")
+    /// Advance `AssigneeStatus` tracker by one delay tranche,
+    /// but without exceeding the current tranche.
+    pub(super) fn advance_assignee_status<S: 'static>(&self, now: DelayTranche, mut c: AssigneeStatus)
+     -> Option<AssigneeStatus> 
+    {
+        // We stop if enough checkers were assigned and we've replaced
+        // any no shows.
+        if c.assigned > c.target && c.debt == 0 { return None; }
+
+        // We do not count tranches for which we should not yet have
+        // recieved any assignments, even though we do store early
+        // announcements.
+        if c.tranche + c.noshow_timeout > now + self.targets.noshow_timeout {
+            return None;
+        }
+        // === while c.tranche + noshow_timeout <= now + self.targets.noshow_timeout
+
+        let d = self.count_assignees_in_tranche::<S>(c.tranche, c.noshow_timeout);
+        c.assigned += d.assigned;
+        c.waiting  += d.waiting;
+        c.noshows  += d.noshows;
+        c.debt     += d.noshows;
+        c.approved += d.approved;
+        c.tranche += 1;
+
+        // Consider later tranches if not enough assignees yet
+        if c.assigned <= c.target {
+            return Some(c); 
+            // === continue;
+        }
+        // Ignore later tranches if we've enough assignees and no no shows
+        if c.debt == 0 {
+            return Some(c);
+            // === break;
+        }
+        // We replace no shows by increasing our target when
+        // reaching our initial or any subseuent target.
+        // We ask for two new checkers per no show here,
+        // acording to the analysis (TODO: Alistair)
+        c.target = c.assigned; // + c.debt;
+        c.debt = 0;
+        // We view tranches as later for being counted no show
+        // since they announced much latter.
+        c.noshow_timeout += self.targets.noshow_timeout;
+
+        Some(c)
+        // === continue;
+    }
+
+    /// Recompute our current approval progress numbers
+    pub fn assignee_status<S: 'static>(&self, now: DelayTranche) -> AssigneeStatus {
+        let mut s = self.init_assignee_status::<S>();
+        while let Some(t) = self.advance_assignee_status::<S>(now, s.clone()) { s = t; }
+        s
     }
 
     pub fn is_approved_before(&self, now: DelayTranche) -> bool {
-        self.approval_status::<stories::RelayVRFStory>(now).is_approved()
-        && self.approval_status::<stories::RelayEquivocationStory>(now).is_approved()
+        self.assignee_status::<stories::RelayVRFStory>(now).is_approved()
+        && self.assignee_status::<stories::RelayEquivocationStory>(now).is_approved()
     }
 }
 
@@ -344,39 +346,30 @@ pub struct Tracker {
     pub(super) current_slot: u64,
     pub(super) relay_vrf_story: stories::RelayVRFStory,
     relay_equivocation_story: stories::RelayEquivocationStory,
-    candidates: BTreeMap<ParaId,CandidateTracker>
+    candidates: HashMap<ParaId,CandidateTracker>
 }
 
 impl Tracker {
-    /// Create a tracker to build a `Watcher` or `Announcer`
+    /// Create a tracker from which we build a `Watcher` or `Announcer`
+    // TODO: Improve `stories::*::new()` methods
     pub fn new(context: ApprovalContext, target: u16) -> AssignmentResult<Tracker> {
         let current_slot = context.anv_slot_number();
-        // TODO: Improve `stories::*::new()` methods
         let relay_vrf_story = context.new_vrf_story() ?;
-        let relay_equivocation_story = context.new_equivocation_story(); 
-        let candidates = BTreeMap::new();
-        // TODO: Add parachain candidates here maybe ??
-        Ok(Tracker { context, current_slot, relay_vrf_story, relay_equivocation_story, candidates, })
-    }
+        let relay_equivocation_story = context.new_equivocation_story();
 
-    /// Initialize tracking a candidate.
-    ///
-    /// Invoke this for all desired candidates before invoking
-    /// the `into_watcher` or `into_announcer` builders, normally.
-    /// Add all candidates from `CandidateEvents`.
-    ///
-    /// Returns `false` if this invokation reinitalized an
-    /// existing candidate, maybe harmless maybe not.
-    pub fn initalize_candidate(&mut self, paraid: ParaId) -> bool {
-        let candidate = CandidateTracker {
-            // TODO: We'll want more nuanced control over initial targets levels.
-            targets:   ApprovalTargets::default(),
-            checkers:  HashMap::new(),
-            relay_vrf_modulo:   AssignmentsByDelay::default(),
-            relay_vrf_delay:    AssignmentsByDelay::default(),
-            relay_equivocation: AssignmentsByDelay::default(),
-        };
-        self.candidates.insert(paraid,candidate).is_none() 
+        let mut candidates = HashMap::new();
+        for paraid in context.paraids() {
+            candidates.insert(paraid, CandidateTracker {
+                // TODO: We'll want more nuanced control over initial targets levels.
+                targets:   ApprovalTargets::default(),
+                checkers:  HashMap::new(),
+                relay_vrf_modulo:   AssignmentsByDelay::default(),
+                relay_vrf_delay:    AssignmentsByDelay::default(),
+                relay_equivocation: AssignmentsByDelay::default(),
+            } );
+        }
+
+        Ok(Tracker { context, current_slot, relay_vrf_story, relay_equivocation_story, candidates, })
     }
 
     pub fn context(&self) -> &ApprovalContext { &self.context }
@@ -405,6 +398,14 @@ impl Tracker {
     pub fn candidate_mut(&mut self, paraid: &ParaId) -> AssignmentResult<&mut CandidateTracker> {
         self.candidates.get_mut(paraid)
             .ok_or(Error::BadAssignment("Absent ParaId"))
+    }
+
+    pub fn candidates(&self) -> impl Iterator<Item=(&ParaId,&CandidateTracker)> + '_ {
+        self.candidates.iter()
+    }
+
+    pub fn candidates_mut(&mut self) -> impl Iterator<Item=(&ParaId,&mut CandidateTracker)> + '_ {
+        self.candidates.iter_mut()
     }
 
     /// Insert assignment verified elsewhere

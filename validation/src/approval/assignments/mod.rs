@@ -67,8 +67,8 @@ impl ApprovalTargets {
 /// 
 #[derive(Clone)]
 pub struct AssigneeStatus {
-    /// Highest tranche considered
-    pub tranche: DelayTranche,
+    /// Highest tranche considered plus one
+    tranche: DelayTranche,
     /// Assignement target, including increases due to no shows.
     pub target: u32,
     /// Assigned validators.
@@ -82,9 +82,18 @@ pub struct AssigneeStatus {
     pub debt: u32,
     /// Approval votes thus far.
     pub approved: u32,
+    /// How long we wait for no shows
+    ///
+    /// Increases if we're replacing no shows from multiple tranches
+    pub noshow_timeout: u32,
 }
 
 impl AssigneeStatus {
+    /// Highest tranche considered thus far
+    pub fn tranche(&self) -> Option<DelayTranche> {
+        self.tranche.checked_sub(1)
+    }
+
     pub fn is_approved(&self) -> bool {
         debug_assert!(self.assigned == self.assigned + self.waiting);
         self.target == self.approved && self.approved == self.assigned && self.waiting == 0
