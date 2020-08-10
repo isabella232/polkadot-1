@@ -87,16 +87,41 @@ where C: Criteria, Assignment<C>: Position,
 impl<C> AssignmentsByDelay<C,()> 
 where C: Criteria, Assignment<C,()>: Position,
 {
+    pub fn drain_filter<'a,R,F>(&'a mut self, r: R, mut f: F)
+     -> impl Iterator<Item=Assignment<C,()>> + 'a
+    where
+        R: ::std::ops::RangeBounds<DelayTranche>,
+        F: 'a + FnMut(&Assignment<C,()>) -> bool,
+    {
+        self.0.range_mut(r).map( move |(_,selfy)| {
+            // https://github.com/rust-lang/rust/pull/43245#issuecomment-319188468
+            let len = selfy.len();
+            let mut del = 0;
+            {
+                let v = &mut **selfy;
+
+                for i in 0..len {
+                    if f(&v[i]) {
+                        del += 1;
+                    } else if del > 0 {
+                        v.swap(i - del, i);
+                    }
+                }
+            }
+            selfy.drain(len - del..)            
+        } ).flatten()
+    }
+
     /// Remove entire tranche from pending announcements
     ///
     /// TODO: Should this contain max paramateter and randomly advance
     /// any excessive annoucements?  Should the announcer do this
     /// internally?  Or should all scheduling decissions be made in
     /// advnace?
-    pub(super) fn pull_tranche(&mut self, delay_tranche: DelayTranche)
+    pub(super) fn pull_tranche(&mut self, tranche: DelayTranche)
      -> Option<Vec< Assignment<C,()> >> 
     {
-        self.0.remove(&delay_tranche)
+        self.0.remove(&tranche)
     }
 }
 

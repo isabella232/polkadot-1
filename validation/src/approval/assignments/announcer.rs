@@ -75,6 +75,9 @@ pub struct Announcer {
     ///
     /// TODO: Actually substrate manages this another way, so change this part.
     myself: Keypair,
+    // /// Unannounced potential assignments with delay determined by relay chain VRF
+    // /// TODO: We'll need this once we add functionality to delay work
+    // pending_relay_vrf_modulo: AssignmentsByDelay<criteria::RelayVRFDelay,()>,
     /// Unannounced potential assignments with delay determined by relay chain VRF
     pending_relay_vrf_delay: AssignmentsByDelay<criteria::RelayVRFDelay,()>,
     /// Unannounced potential assignments with delay determined by candidate equivocation
@@ -96,12 +99,6 @@ impl ops::DerefMut for Announcer {
 }
 
 impl Announcer {
-    /// Mark myself as approving this candiddate
-    pub fn approve_mine(&mut self, paraid: &ParaId) -> AssignmentResult<()> {
-        let myself = self.id();
-        self.tracker.candidate_mut(paraid)?.approve(myself, true)
-    }
-
     fn access_pending_mut<C>(&mut self) -> &mut AssignmentsByDelay<C,()>
     where C: DelayCriteria, Assignment<C>: Position,
     {
@@ -153,18 +150,14 @@ impl Announcer {
         .expect("Oops, we've some foreign type as Criteria!")
     }
 
-    fn announce_pending_iter<C,I>(&mut self, slots: I)
+    // TODO: It'll be more efficent to operate on ranges here
+    fn announce_pending<'a,C,F>(&'a mut self, tranche: DelayTranche, f: F)
     where C: DelayCriteria, Assignment<C>: Position,
-          I: IntoIterator<Item=DelayTranche>,
+          F: 'a + FnMut(&Assignment<C,()>) -> bool,
     {
-        let mut slots = slots.into_iter();
-        let mut vs = Vec::with_capacity(slots.size_hint().0);
-        for slot in slots {
-            if let Some(ps) = self.access_pending_mut::<C>().pull_tranche(slot) {
-                vs.push(ps);
-            }
-        }
-        for a in vs.iter().flatten() {
+        let mut vs: Vec<Assignment<C,()>> = self.access_pending_mut::<C>()
+            .drain_filter(tranche..tranche+1,f).collect();
+        for a in vs {
             let context = self.tracker.context().clone();
             let recieved = self.tracker.current_delay_tranche();
             let paraid = a.paraid(&context)
@@ -181,18 +174,6 @@ impl Announcer {
         }
     }
 
-    fn announce_pending<C>(&mut self, new_delay_tranche: DelayTranche)
-    where C: DelayCriteria, Assignment<C>: Position,
-    {
-        let r = self.current_delay_tranche()..new_delay_tranche;
-        self.announce_pending_iter::<C,_>(r)
-        // !! c.assigned < c.target !!
-    }
-
-    /*
-    fn advance<S: 'static>(&mut self, now: u64) {
-    }
-
     /// Advances the AnV slot aka time to the specified value,
     /// enquing any pending announcements too.
     pub fn advance_anv_slot(&mut self, new_slot: u64) {
@@ -201,55 +182,52 @@ impl Announcer {
 
         let new_delay_tranche = self.delay_tranche(new_slot)
             .expect("new_slot > current_slot > context.anv_slot_number");
-        let tranche = self.current_delay_tranche();
+        let now = self.current_delay_tranche();
+        // let myself = self.id();
 
         // We first reconstruct the current assignee status for any unapproved
         // sessions, including all current announcements.
-        let mut relay_vrf_asignees = HashMap::new();
-        let mut relay_equivocation_asignees = HashMap::new();
+        let mut relay_vrf_assignees = HashMap::new();
+        let mut relay_equivocation_assignees = HashMap::new();
         for (paraid,candidate) in self.tracker.candidates() {
-            let c = candidate.assignee_status::<stories::RelayVRFStory>(tranche);
-            if ! c.is_approved() { relay_vrf_asignees.insert(*paraid,c); }
-            let c = candidate.assignee_status::<stories::RelayEquivocationStory>(tranche);
-            if ! c.is_approved() { relay_equivocation_asignees.insert(*paraid,c); }
+            // We cannot skip previously approved checks here because 
+            // we could announce ourself as RelayEquivocation checkers
+            // even after fulfilling a RelayVRF assignment.
+            // if candidate.is_approved_by_checker(&myself) { continue; }
+
+            let c = candidate.assignee_status::<stories::RelayVRFStory>(now);
+            if ! c.is_approved() { relay_vrf_assignees.insert(*paraid,c); }
+            let c = candidate.assignee_status::<stories::RelayEquivocationStory>(now);
+            if ! c.is_approved() { relay_equivocation_assignees.insert(*paraid,c); }
         }
 
-
-
-        // Assignee counter trackers for each story and advanced up to the current state
-        let mut relay_vrf_asignees = self.asignee_tracker::<stories::RelayVRFStory>(new_slot);
-        let mut relay_vrf_status = relay_vrf_asignees.nth(self.tracker.current_slot);
-        debug_assert!(relay_vrf_status.tranche == self.tracker.current_slot);
-
-        let relay_equivocation_asignees = self.asignee_tracker::<stories::RelayEquivocationStory>(new_slot);
-        let mut relay_equivocation_status = relay_equivocation_asignees.nth(self.tracker.current_slot);
-        debug_assert!(relay_equivocation_status.tranche == self.tracker.current_slot);
-
-
-        let mut relay_vrf_asignees =
-            self.init_assignee_status::<stories::RelayVRFStory>();
-        let mut relay_equivocation_asignees =
-            self.init_assignee_status::<stories::RelayEquivocationStory>();
-        loop {
-            if let Some(t) = self.advance_assignee_status::<stories::RelayVRFStory>(now, relay_vrf_asignees.clone()) { }
-            if let Some(t) = self.advance_assignee_status::<stories::RelayEquivocationStory>(now, relay_equivocation_asignees.clone()) { }
-            
+        for tranche in 0..now {
+            // We admit a.delay_tranche() < tranche here because
+            // `self.pending_*` could represent posponed work.
+            let context = self.tracker.context().clone();
+            self.announce_pending::<criteria::RelayVRFDelay,_>(tranche, |a| {
+                relay_vrf_assignees.get(& a.paraid(&context).unwrap())
+                .filter( |c| a.delay_tranche(&context) <= c.tranche().unwrap() )
+                .is_some()
+            } );
+            self.announce_pending::<criteria::RelayEquivocation,_>(tranche, |a| {
+                relay_equivocation_assignees.get(& a.paraid(&context).unwrap())
+                .filter( |c| a.delay_tranche(&context) <= c.tranche().unwrap() )
+                .is_some()
+            } );
+            // We avoid recomputing assignee statuses inside this loop
+            // becuase we never check any given candidate more than once
         }
-
-
-
-        for tranche in self.tracker.current_slot..new_slot {
-            ;
-        }
-
-self.approval_status(now).is_approved()
-&& self.approval_status(now).is_approved()
-
-
-        self.announce_pending::<criteria::RelayVRFDelay>(new_delay_tranche);
-        self.announce_pending::<criteria::RelayEquivocation>(new_delay_tranche);
-        self.tracker.current_slot = new_slot;
     }
-    */
+
+    /// Mark myself as approving this candiddate
+    pub fn approve_mine(&mut self, paraid: &ParaId) -> AssignmentResult<()> {
+        let myself = self.id();
+        self.tracker.candidate_mut(paraid)?.approve(myself, true) ?;
+        // TODO: We could restrict this to the current paraid of course.
+        self.advance_anv_slot(self.tracker.current_slot);
+        Ok(())
+    }
+
 }
 
