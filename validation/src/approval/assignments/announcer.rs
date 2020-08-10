@@ -49,6 +49,8 @@ impl Tracker {
             selfy.create_pending_delay(criteria::RelayVRFDelay { paraid: *paraid })
                 .expect("Assignment::create cannot fail for RelayVRFDelay, only RelayEquivocation, qed");
         }
+        // TODO: We cannot announce here because we maybe require time to bump some work to larger delays
+        // selfy.advance_anv_slot(self.tracker.current_slot);
         Ok(selfy)
     }
 }
@@ -203,7 +205,7 @@ impl Announcer {
     /// Advances the AnV slot aka time to the specified value,
     /// enquing any pending announcements too.
     pub fn advance_anv_slot(&mut self, new_slot: u64) {
-        // We allow rerunning this with the current slot rightn ow, but..
+        // We allow rerunning this with the current slot right now, but..
         if new_slot < self.tracker.current_slot { return; }
 
         let new_delay_tranche = self.delay_tranche(new_slot)
